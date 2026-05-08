@@ -5,6 +5,7 @@
   "env": ".env",
   "graphs": {
     "lead_agent": "deerflow.agents:make_lead_agent",
-    "archon_workflow": "deerflow.archon_workflow:build_archon_graph"
+    "archon_workflow": "deerflow.archon_workflow:build_archon_graph",
+    "unified_prover": "deerflow.archon_workflow:build_unified_graph"
   }
 }

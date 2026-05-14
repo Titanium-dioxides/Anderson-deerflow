@@ -6,10 +6,18 @@
 > 3. **测试结果记录在 `SMOKE_TEST_LOG.md`** — 通过则删除测试代码，失败则保留并标记
 > 4. **每次修改后必须 `git commit`** — commit message 须包含改动摘要
 > 5. **维护 `TODO.md`** — 未完成功能、已知问题、待改进项，按优先级排列。每次发现新问题必须更新
+> 6. **维护 `BLOCKERS.md`** — 区分受阻问题（外部依赖/架构限制）与未实现功能。每次解除 blocker 必须记录
 
 ---
 
 ## 2026-05-14
+
+### [blockers] 新增 BLOCKERS.md + COMPARISON.md — 差距分析与受阻原因
+- **文件:** `BLOCKERS.md` (新建), `COMPARISON.md` (新建)
+- **内容:**
+  - COMPARISON.md：6 维度 30+ 项能力对照表，综合移植度 68%
+  - BLOCKERS.md：3 个受阻问题 + 1 个架构约束 + 2 个未实现功能，含依赖树
+- **准则:** MIGRATION_LOG.md 增加第 6 条开发准则——维护 BLOCKERS.md
 
 ### [todo] 新增 TODO.md — 待解决问题跟踪文件
 - **文件:** `TODO.md` (新建)

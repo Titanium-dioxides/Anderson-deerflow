@@ -5,10 +5,16 @@
 > 2. **每次修改代码后必须执行冒烟测试** — 规则见 `SMOKE_TEST.md`
 > 3. **测试结果记录在 `SMOKE_TEST_LOG.md`** — 通过则删除测试代码，失败则保留并标记
 > 4. **每次修改后必须 `git commit`** — commit message 须包含改动摘要
+> 5. **维护 `TODO.md`** — 未完成功能、已知问题、待改进项，按优先级排列。每次发现新问题必须更新
 
 ---
 
 ## 2026-05-14
+
+### [todo] 新增 TODO.md — 待解决问题跟踪文件
+- **文件:** `TODO.md` (新建)
+- **内容:** 10 项待解决问题，按高/中/低优先级排列，包含已知障碍和可能的方案
+- **准则:** MIGRATION_LOG.md 增加第 5 条开发准则——维护 TODO.md
 
 ### [phase3] 自动化策略级联 — rfl→simp→ring→linarith→omega→aesop→grind
 - **文件:** `overlay/backend/workflows/archon_graph.py`, `overlay/backend/workflows/unified_graph.py`

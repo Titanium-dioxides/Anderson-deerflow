@@ -106,22 +106,22 @@ Lead Agent (create_agent)    ←── 标准入口点
 
 ## 四、每项问题的技术债务修复成本
 
-| # | 问题 | 修复成本 | 修复路径 |
-|:-:|------|:--------:|----------|
-| R1 | 直接文件 I/O | 🟢 低 | `sandbox.write_file()` 替代 `Path.write_text()` |
-| R2 | 直接 subprocess | 🟢 低 | `sandbox.bash_tool()` 替代 `_bash()` |
+| # | 问题 | 修复成本 | 修复路径 | 状态 |
+|:-:|------|:--------:|----------|:----:|
+| R1 | 直接文件 I/O | 🟢 低 | `sandbox.write_file()` 替代 `Path.write_text()` | ✅ 2026-05-14 |
+| R2 | 直接 subprocess | 🟢 低 | `sandbox.execute_command()` 替代 `_bash()` | ✅ 2026-05-14 |
 | R3 | 手动 Lean 编译 | 🟡 中 | 逐步迁移到 LSP 工具：先 `lean_multi_attempt` → `lean_verify` |
-| R4 | Skills 未注册 | 🟢 低 | 将 SKILL.md 放在 `deer-flow/skills/` 下即可自动加载 |
-| Y1 | 手动 StateGraph | 🔴 高 | 需重构为 `create_agent()` + subagent 模式 |
-| Y2 | 手动工具获取 | 🟢 低 | `get_available_tools()` 替代 `_get_lsp_tools()` |
-| Y3 | 硬编码模型名 | 🟢 低 | 从 `app_config` 读取 |
-| Y4 | 自定义状态 | 🔴 高 | 继承 `ThreadState` 并启用 checkpoint |
-| Y5 | grep 扫描 | 🟡 中 | 逐步迁移到 LSP: `lean_file_outline` + `lean_diagnostic_messages` |
-| Y6 | 手动错误处理 | 🟢 低 | 引入 middleware |
-| G1 | 并行 | 🟡 中 | `spawn_subagent()` 替代串行 for |
-| G2 | 提示词注入 | 🟢 低 | `apply_prompt_template()` |
-| G3 | 硬编码路径 | 🟢 低 | 从 `app_config` 或环境变量读取 |
-| G4 | 图注册 | 🟢 低 | 修改 `backend/langgraph.json` |
+| R4 | Skills 未注册 | 🟢 低 | `_load_skill_content()` 注入 SystemMessage | ✅ 2026-05-14 |
+| Y1 | 手动 StateGraph | 🔴 高 | 需重构为 `create_agent()` + subagent 模式 | 🚧 |
+| Y2 | 手动工具获取 | 🟢 低 | `get_available_tools()` 替代 `_get_lsp_tools()` | 🚧 |
+| Y3 | 硬编码模型名 | 🟢 低 | `_get_model_name()` 从 `get_app_config()` 读取 | ✅ 2026-05-14 |
+| Y4 | 自定义状态 | 🔴 高 | 继承 `ThreadState` 并启用 checkpoint | 🚧 |
+| Y5 | grep 扫描 | 🟡 中 | 逐步迁移到 LSP: `lean_file_outline` + `lean_diagnostic_messages` | 🚧 |
+| Y6 | 手动错误处理 | 🟢 低 | 引入 middleware | 🚧 |
+| G1 | 并行 | 🟡 中 | `subagent_task()` 替代串行 for | 🚧 |
+| G2 | 提示词注入 | 🟢 低 | `apply_prompt_template()` 整合技能 | 🚧 |
+| G3 | 硬编码路径 | 🟢 低 | 从 `app_config` 或环境变量读取 | 🚧 |
+| G4 | 图注册 | 🟢 低 | 已确认 deer-flow 原生注册 | ✅ |
 
 ---
 

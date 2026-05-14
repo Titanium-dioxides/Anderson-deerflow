@@ -97,6 +97,28 @@ def _load_skill_content(skill_name: str) -> str:
 _DEFAULT_SKILL = _load_skill_content("archon-lean4")
 
 
+def _load_skills_deerflow() -> str:
+    """G2: 通过 DeerFlow 原生 skills storage 加载技能内容。"""
+    try:
+        from deerflow.skills.storage import get_or_new_skill_storage
+        storage = get_or_new_skill_storage()
+        skills = storage.load_skills(enabled_only=False)
+        parts = []
+        for s in skills:
+            if s.name in ("archon-lean4",):
+                content = s.skill_file.read_text() if s.skill_file.exists() else ""
+                if content.startswith("---"):
+                    _, _, body = content.partition("---")
+                    _, _, body = body.partition("---")
+                    content = body.strip()
+                if content:
+                    parts.append(f"## {s.name}\n{content}")
+        return "\n\n".join(parts)
+    except Exception as e:
+        print(f"[skills] ⚠ DeerFlow skills storage 不可用: {e}")
+        return _DEFAULT_SKILL
+
+
 def _bash(cmd: str, cwd: str) -> subprocess.CompletedProcess:
     """
     R2 修复: 通过 DeerFlow Sandbox 执行命令。
@@ -993,8 +1015,9 @@ def prover(state: ArchonState) -> ArchonState:
     base_sys = "Fill every `sorry` with a correct Lean 4 proof. "
     base_sys += "Return ONLY the complete file content. "
     base_sys += "Do NOT change anything outside the `sorry` blocks."
-    if _DEFAULT_SKILL:
-        base_sys += f"\n\n## 技能参考\n{_DEFAULT_SKILL[:2000]}"
+    skill_text = _load_skills_deerflow() or _DEFAULT_SKILL
+    if skill_text:
+        base_sys += f"\n\n## 技能参考\n{skill_text[:2000]}"
 
     futures = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:

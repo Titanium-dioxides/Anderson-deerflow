@@ -1,10 +1,20 @@
 # MIGRATION_LOG.md — Archon + Rethlas → DeerFlow 移植记录
 
-> 每次修改必须在此记录。格式: `YYYY-MM-DD: [组件] 改动说明`
+> 📋 **本项目开发准则：**
+> 1. **每次代码修改必须记录在 `MIGRATION_LOG.md`** — 格式: `YYYY-MM-DD: [组件] 改动说明`
+> 2. **每次修改代码后必须执行冒烟测试** — 规则见 `SMOKE_TEST.md`
+> 3. **测试结果记录在 `SMOKE_TEST_LOG.md`** — 通过则删除测试代码，失败则保留并标记
+> 4. **每次修改后必须 `git commit`** — commit message 须包含改动摘要
 
 ---
 
 ## 2026-05-14
+
+### [dev-standards] 新增冒烟测试规范 + SMOKE_TEST.md + SMOKE_TEST_LOG.md
+- **文件:** `SMOKE_TEST.md` (新建), `SMOKE_TEST_LOG.md` (新建)
+- **改动:** 确立 4 条项目开发准则，要求每次修改代码后执行冒烟测试、记录结果、git commit
+- **测试:** L0+L1+L2 冒烟测试 42/42 通过
+- **配套:** `tests/fixtures/sample.lean` 测试样本文件
 
 ### [deerflow] generator.md — 重写为独立数学推理提示词
 - **文件:** `overlay/skills/custom/math-prover/prompts/generator.md`

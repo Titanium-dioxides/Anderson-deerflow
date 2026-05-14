@@ -27,6 +27,13 @@ from deerflow.config.app_config import get_app_config
 from deerflow.models import create_chat_model
 from deerflow.mcp.cache import get_cached_mcp_tools
 
+# R1/R2 修复: 使用 DeerFlow Sandbox 替代直接 subprocess/Path I/O
+try:
+    from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+    _SANDBOX_AVAILABLE = True
+except Exception:
+    _SANDBOX_AVAILABLE = False
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # 状态 — 纯内存（增强）
@@ -90,6 +97,27 @@ _DEFAULT_SKILL = _load_skill_content("archon-lean4")
 
 
 def _bash(cmd: str, cwd: str) -> subprocess.CompletedProcess:
+    """
+    R2 修复: 通过 DeerFlow Sandbox 执行命令。
+    开发环境回退到直接 subprocess。
+    """
+    if _SANDBOX_AVAILABLE:
+        try:
+            provider = get_sandbox_provider()
+            sandbox_id = provider.acquire("archon-workflow")
+            sb = provider.get(sandbox_id)
+            if sb:
+                full_cmd = f"cd {cwd} 2>/dev/null; {cmd}" if cwd else cmd
+                result = sb.execute_command(full_cmd)
+                return subprocess.CompletedProcess(
+                    args=["sandbox", cmd],
+                    returncode=0 if not result.startswith("Error:") else 1,
+                    stdout=result if not result.startswith("Error:") else "",
+                    stderr=result if result.startswith("Error:") else "",
+                )
+        except Exception as e:
+            pass  # fallback
+    # Fallback: 直接执行
     PATH = f"{os.path.expanduser('~/.elan/bin')}:{os.environ.get('PATH', '')}"
     return subprocess.run(
         ["bash", "-c", cmd], cwd=cwd, capture_output=True, text=True,
@@ -121,11 +149,32 @@ def _build(ws: str) -> tuple[bool, str]:
 
 
 def _read(ws: str, f: str) -> str:
+    """R1 修复: 通过 Sandbox 读取文件，回退到直接 Path I/O。"""
+    if _SANDBOX_AVAILABLE:
+        try:
+            provider = get_sandbox_provider()
+            sandbox_id = provider.acquire("archon-workflow")
+            sb = provider.get(sandbox_id)
+            if sb:
+                return sb.read_file(str(Path(ws) / f))
+        except Exception:
+            pass
     p = Path(ws) / f
     return p.read_text() if p.exists() else ""
 
 
 def _write(ws: str, f: str, content: str) -> None:
+    """R1 修复: 通过 Sandbox 写入文件，回退到直接 Path I/O。"""
+    if _SANDBOX_AVAILABLE:
+        try:
+            provider = get_sandbox_provider()
+            sandbox_id = provider.acquire("archon-workflow")
+            sb = provider.get(sandbox_id)
+            if sb:
+                sb.write_file(str(Path(ws) / f), content)
+                return
+        except Exception:
+            pass
     (Path(ws) / f).write_text(content)
 
 

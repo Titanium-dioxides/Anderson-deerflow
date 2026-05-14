@@ -55,6 +55,12 @@ from deerflow.config.app_config import get_app_config
 from deerflow.models import create_chat_model
 from deerflow.mcp.cache import get_cached_mcp_tools
 
+try:
+    from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+    _SANDBOX_AVAILABLE = True
+except Exception:
+    _SANDBOX_AVAILABLE = False
+
 
 # ── 路径常量 ──────────────────────────────────────────────────────────
 _PROJECT_DIR = Path(__file__).parent.parent.parent
@@ -141,6 +147,22 @@ _DEFAULT_SKILL = _load_skill_content("archon-lean4")
 
 
 def _bash(cmd: str, cwd: str) -> subprocess.CompletedProcess:
+    if _SANDBOX_AVAILABLE:
+        try:
+            provider = get_sandbox_provider()
+            sb_id = provider.acquire("archon-workflow")
+            sb = provider.get(sb_id)
+            if sb:
+                full_cmd = f"cd {cwd} 2>/dev/null; {cmd}" if cwd else cmd
+                result = sb.execute_command(full_cmd)
+                return subprocess.CompletedProcess(
+                    args=["sandbox", cmd],
+                    returncode=0 if not result.startswith("Error:") else 1,
+                    stdout=result if not result.startswith("Error:") else "",
+                    stderr=result if result.startswith("Error:") else "",
+                )
+        except Exception:
+            pass
     PATH = f"{os.path.expanduser('~/.elan/bin')}:{os.environ.get('PATH', '')}"
     return subprocess.run(
         ["bash", "-c", cmd], cwd=cwd, capture_output=True, text=True,
@@ -203,11 +225,30 @@ def _build(ws: str) -> tuple[bool, str]:
 
 
 def _read(ws: str, f: str) -> str:
+    if _SANDBOX_AVAILABLE:
+        try:
+            provider = get_sandbox_provider()
+            sb_id = provider.acquire("archon-workflow")
+            sb = provider.get(sb_id)
+            if sb:
+                return sb.read_file(str(Path(ws) / f))
+        except Exception:
+            pass
     p = Path(ws) / f
     return p.read_text() if p.exists() else ""
 
 
 def _write(ws: str, f: str, content: str) -> None:
+    if _SANDBOX_AVAILABLE:
+        try:
+            provider = get_sandbox_provider()
+            sb_id = provider.acquire("archon-workflow")
+            sb = provider.get(sb_id)
+            if sb:
+                sb.write_file(str(Path(ws) / f), content)
+                return
+        except Exception:
+            pass
     p = Path(ws) / f
     p.write_text(content)
 

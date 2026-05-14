@@ -51,6 +51,7 @@ from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
+from deerflow.config.app_config import get_app_config
 from deerflow.models import create_chat_model
 from deerflow.mcp.cache import get_cached_mcp_tools
 
@@ -119,6 +120,26 @@ def fresh_state(statement: str, ws: str = "", max_loops: int = 5) -> UnifiedStat
 # ── 基础工具 ──────────────────────────────────────────────────────────
 
 
+_SKILLS_DIR = Path(__file__).parent.parent.parent / "skills" / "custom"
+
+
+def _get_model_name() -> str:
+    try:
+        return get_app_config().models[0].name
+    except Exception:
+        return "deepseek-v4"
+
+
+def _load_skill_content(skill_name: str) -> str:
+    skill_path = _SKILLS_DIR / skill_name / "SKILL.md"
+    if skill_path.exists():
+        return skill_path.read_text()
+    return ""
+
+
+_DEFAULT_SKILL = _load_skill_content("archon-lean4")
+
+
 def _bash(cmd: str, cwd: str) -> subprocess.CompletedProcess:
     PATH = f"{os.path.expanduser('~/.elan/bin')}:{os.environ.get('PATH', '')}"
     return subprocess.run(
@@ -127,7 +148,9 @@ def _bash(cmd: str, cwd: str) -> subprocess.CompletedProcess:
     )
 
 
-def _model(name="deepseek-v4", think=False):
+def _model(name=None, think=False):
+    if name is None:
+        name = _get_model_name()
     return create_chat_model(name, thinking_enabled=think)
 
 
@@ -274,7 +297,7 @@ def _get_lsp_tools() -> list:
         return []
 
 
-def _call_with_lsp(messages: list, model_name: str = "deepseek-v4", max_turns: int = 3) -> str:
+def _call_with_lsp(messages: list, model_name: str | None = None, max_turns: int = 3) -> str:
     """Call model with LSP tools bound. Auto-handles tool calls."""
     tools = _get_lsp_tools()
     model = create_chat_model(model_name).bind_tools(tools) if tools else create_chat_model(model_name)
@@ -801,6 +824,8 @@ def prover_node(state: UnifiedState) -> UnifiedState:
             f"将文件中的 `sorry` 替换为正确且完整的 Lean 证明。"
             f"{goal_ctx}{rethlas_ctx}{planner_hint}{mode_ctx}"
         )
+        if _DEFAULT_SKILL:
+            sys_msg += f"\n\n## 技能参考\n{_DEFAULT_SKILL[:2000]}"
         resp_text = _call_with_lsp([
             SystemMessage(content=sys_msg),
             HumanMessage(content=f"文件 {f}:\n```lean\n{file_content}\n```"),

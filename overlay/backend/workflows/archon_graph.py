@@ -23,6 +23,7 @@ from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
+from deerflow.config.app_config import get_app_config
 from deerflow.models import create_chat_model
 from deerflow.mcp.cache import get_cached_mcp_tools
 
@@ -62,8 +63,30 @@ def fresh_state(ws: str, max_loops: int = 5) -> ArchonState:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 工具函数
+# 配置 / 技能 / 工具函数
 # ═══════════════════════════════════════════════════════════════════════
+
+
+_SKILLS_DIR = Path(__file__).parent.parent.parent / "skills" / "custom"
+
+
+def _get_model_name() -> str:
+    """从 DeerFlow 配置读取默认模型名（Y3 修复：消除硬编码）。"""
+    try:
+        return get_app_config().models[0].name
+    except Exception:
+        return "deepseek-v4"
+
+
+def _load_skill_content(skill_name: str) -> str:
+    """加载 DeerFlow skills 目录下的 SKILL.md 内容（R4 修复）。"""
+    skill_path = _SKILLS_DIR / skill_name / "SKILL.md"
+    if skill_path.exists():
+        return skill_path.read_text()
+    return ""
+
+
+_DEFAULT_SKILL = _load_skill_content("archon-lean4")
 
 
 def _bash(cmd: str, cwd: str) -> subprocess.CompletedProcess:
@@ -106,7 +129,9 @@ def _write(ws: str, f: str, content: str) -> None:
     (Path(ws) / f).write_text(content)
 
 
-def _model(name="deepseek-v4", think=False):
+def _model(name=None, think=False):
+    if name is None:
+        name = _get_model_name()
     return create_chat_model(name, thinking_enabled=think)
 
 
@@ -240,7 +265,7 @@ def _get_lsp_tools() -> list:
         return []
 
 
-def _call_with_lsp(messages: list, model_name: str = "deepseek-v4", max_turns: int = 3) -> str:
+def _call_with_lsp(messages: list, model_name: str | None = None, max_turns: int = 3) -> str:
     """Call model with LSP tools bound. Handles tool call loop automatically.
 
     这是解决 B1/B2 的关键：模型可以调用 lean_goal/lean_local_search 等 LSP 工具
@@ -773,10 +798,12 @@ def prover(state: ArchonState) -> ArchonState:
         hint = hints.get(f, "")
         fail_modes = failure_modes.get(f, [])
         
-        # ── 根据失败模式调整 SystemMessage ──
+        # ── 注入技能内容（R4 修复）+ 根据失败模式调整 ──
         sys_instructions = "Fill every `sorry` with a correct Lean 4 proof. "
         sys_instructions += "Return ONLY the complete file content. "
         sys_instructions += "Do NOT change anything outside the `sorry` blocks."
+        if _DEFAULT_SKILL:
+            sys_instructions += f"\n\n## 技能参考\n{_DEFAULT_SKILL[:2000]}"
         
         if "missing_infrastructure" in fail_modes:
             sys_instructions += (

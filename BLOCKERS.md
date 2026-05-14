@@ -195,3 +195,84 @@ B3 无集成测试环境
 
 - B2（exact?/apply? 策略）现在也是   Architecture 约束，而非外部依赖
 - 解除 B1 后 B2 自动解除（工具可用后，LLM 可自选使用 exact?/apply?）
+
+---
+
+## 五、DeerFlow 文档学习后的重新评估 (2026-05-14)
+
+### DeerFlow 提供了什么
+
+阅读 `README.md`、`ARCHITECTURE.md`、`MCP_SERVER.md` 以及源码后发现：
+
+| 能力 | DeerFlow 支持 | 我们当前是否使用 |
+|------|:-------------:|:----------------:|
+| **MCP 工具加载** | `get_mcp_tools()` → `list[BaseTool]` | ❌ 手动 `_bash()` |
+| **模型工具绑定** | `model.bind_tools()` + `create_agent()` | ❌ 直接 `model.invoke()` |
+| **Sub-agents 并行** | `deerflow.subagents` 子代理系统 | ❌ 串行 for 循环 |
+| **Sandbox 隔离** | Docker/Local sandbox provider | ❌ 直调 `subprocess` |
+| **Skills 加载** | `skills/` → SKILL.md → SystemPrompt | ❌ 手动拼接 |
+| **Checkpoint** | LangGraph 内置 | ❌ 无持久化 |
+
+### 六个 blocker 的重新评估
+
+#### B1: LSP 工具不可用 → 状态变更: 🚧 → ⚡ 可解决
+
+**最新理解：** DeerFlow 的 `get_available_tools()` 已经集成了 MCP 工具（通过 `get_cached_mcp_tools()`）。我们只需要：
+
+```python
+from deerflow.tools import get_available_tools
+
+tools = get_available_tools()  # 含 lean-lsp MCP tools
+model = create_chat_model("deepseek-v4").bind_tools(tools)
+```
+
+`model.invoke()` 会自动处理工具调用，不需要手动 MCP 通信。
+
+**根本原因（更新）：** 我们的 graph 节点设计为纯 Python 函数模式，绕过了 DeerFlow 的标准 agent 工具系统。不是技术不可行，是需要架构调整。
+
+**解除方案：**
+- 方案 A（轻量）：在 prover 节点中调用 `get_available_tools()`，`.bind_tools()` 到模型，然后调 `model.invoke()`。模型会自动决定是否调用 LSP MCP 工具
+- 方案 B（标准）：改用 `create_agent()` 或 LangGraph 的 `ToolNode` 模式
+
+#### B2: exact?/apply? 策略缺失 → 状态变更: 🚧 → ⚡ 自动解除
+
+B1 解决后，LLM 可以自行在证明过程中调用 `lean_hammer_premise`（通过 LSP MCP）来查找匹配的引理，然后用 `exact` 或 `apply` 完成证明。**不需要手动实现。**
+
+#### B3: 无集成测试环境 → 状态: 🚧
+
+在容器外无法运行完整 deerflow 测试。这是硬依赖。
+
+#### B4: 并行 Prover → 状态变更: 🚧 → ⚡ 可解决
+
+**最新理解：** DeerFlow 自带 `deerflow.subagents` 系统，支持 spawn 子 agent 并行工作。这比手动 `concurrent.futures` 更优雅。
+
+```python
+from deerflow.subagents import spawn_subagent
+
+# 每个文件 spawn 一个子 agent 去证明
+futures = [spawn_subagent(f"prove_{f}", prover_task) for f in files]
+results = await asyncio.gather(futures)
+```
+
+**根本原因：** 之前不知道 `subagents` 模块的存在。现在知道后，并行化是可行的。
+
+#### B5: 子目标分解 → 状态: ⏳ 未实现（不变）
+
+纯 LLM 任务，时间优先级问题。
+
+#### B6: Review Agent 代码变更 → 状态: ⏳ 未实现（不变）
+
+纯编码任务，改动量小。
+
+### 总结
+
+| # | 之前分类 | 新分类 | 原因 |
+|:-:|:--------:|:------:|------|
+| B1 | 🚧 外部依赖 | ⚡ **架构可解决** | `get_available_tools()` 已集成 MCP，直接调用即可 |
+| B2 | 🚧 外部依赖 | ⚡ **自动解除** | B1 解决后 LLM 可自选使用 exact/apply |
+| B3 | 🚧 无环境 | 🚧 **无环境** | 需要 deer-flow 容器运行时 |
+| B4 |  约束 | ⚡ **架构可解决** | `deerflow.subagents` 支持并行 |
+| B5 | ⏳ 未实现 | ⏳ **未实现** | 纯 LLM 任务 |
+| B6 | ⏳ 未实现 | ⏳ **未实现** | 纯编码任务 |
+
+之前说 3 个 🚧，实际上其中 2 个是对 DeerFlow 能力不了解导致的误判。现在只剩下 B3 是真正的 blocker。

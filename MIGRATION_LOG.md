@@ -12,6 +12,18 @@
 
 ## 2026-05-14
 
+### [docs-deerflow] 学习 DeerFlow 官方文档后重新评估 BLOCKERS.md
+- **文件:** `BLOCKERS.md` (更新)
+- **学习来源:** `README_zh.md`, `ARCHITECTURE.md`, `MCP_SERVER.md`, `tools/tools.py`, `mcp/tools.py`, `agents/lead_agent/agent.py`, `subagents/`
+- **关键发现:**
+  - `get_available_tools()` 已集成 MCP（通过 `get_cached_mcp_tools()`），可直接 `model.bind_tools()`
+  - `deerflow.subagents` 原生支持并行子 agent
+  - lead_agent 使用 `create_agent()` 模式，非直接 `model.invoke()`
+- **BLOCKERS.md 状态变更:**
+  - B1: 🚧外部依赖 → ⚡架构可解决（调用 `get_available_tools()` 即可）
+  - B2: 🚧外部依赖 → ⚡自动解除（B1 解决后 LLM 可自选 exact/apply）
+  - B4:  约束 → ⚡架构可解决（`deerflow.subagents` 可用）
+
 ### [blockers] 新增 BLOCKERS.md + COMPARISON.md — 差距分析与受阻原因
 - **文件:** `BLOCKERS.md` (新建), `COMPARISON.md` (新建)
 - **内容:**

@@ -387,6 +387,61 @@ def _goal_context(goals: list[dict]) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# Phase 3：自动化策略级联
+# ═══════════════════════════════════════════════════════════════════════
+
+
+_AUTO_TACTICS = ["rfl", "simp", "ring", "linarith", "omega", "aesop", "grind"]
+
+
+def _try_tactics_cascade(ws: str, f: str, content: str) -> tuple[bool, str]:
+    """Try automation tactics without calling LLM.
+
+    原版对应：automation tactics cascade — rfl→simp→ring→linarith→omega→aesop→grind。
+    对每个 `sorry` 尝试用 `by {tactic}` 替换并增量编译验证。
+    一旦某个策略编译通过，保留修改并返回 (True, tactic_name)。
+    全部失败则将文件恢复原内容，返回 (False, "")。
+    """
+    if "sorry" not in content:
+        return (True, "no_sorries")
+
+    for tactic in _AUTO_TACTICS:
+        new_content = content.replace("sorry", f"by {tactic}", 1)
+        _write(ws, f, new_content)
+        ok, _ = _verify_file(ws, f)
+        if ok:
+            print(f"[tactic] ✅ {f}: `{tactic}` 成功")
+            return (True, tactic)
+
+    # 全部失败，恢复原内容
+    _write(ws, f, content)
+    print(f"[tactic] ❌ {f}: 所有自动化策略均失败，交 LLM")
+    return (False, "")
+
+
+def _try_tactics_cascade_all(ws: str, f: str) -> tuple[bool, list[str]]:
+    """Try tactics cascade on ALL sorries in a file, one tactic at a time.
+
+    策略：每次替换一个 sorry 为一个 tactic，编译验证。通过则继续下一个 sorry。
+    最终全部通过返回 (True, [tactic_used_each])。
+    """
+    content = _read(ws, f)
+    tactics_used: list[str] = []
+
+    while "sorry" in content:
+        ok, tactic = _try_tactics_cascade(ws, f, content)
+        if ok:
+            tactics_used.append(tactic)
+            content = _read(ws, f)  # 重新读取（已被修改）
+        else:
+            # 恢复，回退 LLM
+            _write(ws, f, content)
+            return (False, tactics_used)
+
+    return (True, tactics_used)
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # 失败模式分类
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -703,6 +758,26 @@ def prover(state: ArchonState) -> ArchonState:
                 f"## 文件 {f}:\n```lean\n{content}\n```"
             )
             print(f"[prove] 使用 planner 指引: {hint[:80]}...")
+        
+        # ── Phase 3: 先试自动化策略级联 ──
+        cascade_ok, tactics_used = _try_tactics_cascade_all(ws, f)
+        if cascade_ok:
+            print(f"[prove] ✅ {f} 全部通过自动化策略: {tactics_used}")
+            done.append(f)
+            state["attempt_history"].append({
+                "file": f, "line": line, "loop": state["loop_count"],
+                "strategy": f"tactics_cascade:{','.join(tactics_used)}",
+                "result": "success", "lean_error": "", "failure_mode": "",
+            })
+            continue
+        
+        # 级联未完全解决 → 用 LLM 处理剩余 sorries
+        content = _read(ws, f)  # 重新读取（级联可能已解决部分 sorry）
+        if "sorry" not in content:
+            done.append(f)
+            continue
+        if tactics_used:
+            print(f"[prove] 级联部分解决 ({tactics_used}), LLM 接手其余")
         
         # ── 主尝试 ──
         resp = _model().invoke([

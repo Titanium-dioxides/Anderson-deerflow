@@ -490,6 +490,47 @@ def failure_report_node(state: UnifiedState) -> UnifiedState:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# Phase 3：自动化策略级联（同步 archon_graph.py）
+# ═══════════════════════════════════════════════════════════════════════
+
+
+_AUTO_TACTICS = ["rfl", "simp", "ring", "linarith", "omega", "aesop", "grind"]
+
+
+def _try_tactics_cascade(ws: str, f: str, content: str) -> tuple[bool, str]:
+    """Try automation tactics without calling LLM.
+
+    原版对应: rfl→simp→ring→linarith→omega→aesop→grind cascade。
+    """
+    if "sorry" not in content:
+        return (True, "no_sorries")
+    for tactic in _AUTO_TACTICS:
+        new_content = content.replace("sorry", f"by {tactic}", 1)
+        _write(ws, f, new_content)
+        ok, _ = _verify_file(ws, f)
+        if ok:
+            print(f"[tactic] ✅ {f}: `{tactic}` 成功")
+            return (True, tactic)
+    _write(ws, f, content)
+    return (False, "")
+
+
+def _try_tactics_cascade_all(ws: str, f: str) -> tuple[bool, list[str]]:
+    """Try tactics cascade on ALL sorries in a file."""
+    content = _read(ws, f)
+    tactics_used: list[str] = []
+    while "sorry" in content:
+        ok, tactic = _try_tactics_cascade(ws, f, content)
+        if ok:
+            tactics_used.append(tactic)
+            content = _read(ws, f)
+        else:
+            _write(ws, f, content)
+            return (False, tactics_used)
+    return (True, tactics_used)
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # Archon 节点 (保留原始 Agent 工作流: planner → prover → reviewer)
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -696,6 +737,26 @@ def prover_node(state: UnifiedState) -> UnifiedState:
             mode_advice = "不要过早放弃。将问题分解为更小的子目标逐步解决。"
 
         mode_ctx = f"\n注意: {mode_advice}" if mode_advice else ""
+
+        # ── Phase 3: 先试自动化策略级联 ──
+        cascade_ok, tactics_used = _try_tactics_cascade_all(ws, f)
+        if cascade_ok:
+            print(f"[prove] ✅ {f} 全部通过自动化策略: {tactics_used}")
+            done.append(f)
+            state["attempt_history"].append({
+                "file": f, "line": line, "loop": state["loop_count"],
+                "strategy": f"tactics_cascade:{','.join(tactics_used)}",
+                "result": "success", "lean_error": "", "failure_mode": "",
+            })
+            continue
+
+        # 级联未完全解决 → 用 LLM 处理剩余
+        file_content = _read(ws, f)
+        if "sorry" not in file_content:
+            done.append(f)
+            continue
+        if tactics_used:
+            print(f"[prove] 级联部分解决 ({tactics_used}), LLM 接手")
 
         # ── 主尝试 ──
         sys_msg = (

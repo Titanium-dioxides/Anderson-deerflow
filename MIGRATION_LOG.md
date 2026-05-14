@@ -10,6 +10,16 @@
 
 ## 2026-05-14
 
+### [phase3] 自动化策略级联 — rfl→simp→ring→linarith→omega→aesop→grind
+- **文件:** `overlay/backend/workflows/archon_graph.py`, `overlay/backend/workflows/unified_graph.py`
+- **改动:**
+  - 新增 `_AUTO_TACTICS = ["rfl", "simp", "ring", "linarith", "omega", "aesop", "grind"]`
+  - 新增 `_try_tactics_cascade(ws, f, content)` — 对单个 sorry 尝试策略级联，每次从原始内容替换，通过 `_verify_file` 增量验证
+  - 新增 `_try_tactics_cascade_all(ws, f)` — 循环调用 cascade 直到全部 sorry 解决或某一 sorry 无解
+  - prover 在调 LLM 前先执行级联：全解决→跳过 LLM，部分解决→LLM 接手剩余
+- **原版对应:** 恢复原 Archon 的 auto-tactics cascade (rfl→simp→ring→linarith→omega→exact?→apply?→grind→aesop)
+- **测试:** 26/26 冒烟测试通过
+
 ### [dev-standards] 新增冒烟测试规范 + SMOKE_TEST.md + SMOKE_TEST_LOG.md
 - **文件:** `SMOKE_TEST.md` (新建), `SMOKE_TEST_LOG.md` (新建)
 - **改动:** 确立 4 条项目开发准则，要求每次修改代码后执行冒烟测试、记录结果、git commit

@@ -21,9 +21,10 @@ from typing import Annotated, Literal
 
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
 from deerflow.models import create_chat_model
+from deerflow.mcp.cache import get_cached_mcp_tools
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -218,6 +219,64 @@ def _format_errors(errors: list[dict], max_lines: int = 40) -> str:
 
 
 _SEARCH_URL = "https://leansearch.net/thm/search"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# B1/B2: LSP MCP 工具集成
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def _get_lsp_tools() -> list:
+    """Get LSP MCP tools from DeerFlow's tool system.
+
+    返回 lean-lsp MCP 服务器暴露的所有 LangChain BaseTool。
+    包括：lean_goal, lean_local_search, lean_leansearch, lean_hammer_premise 等。
+    """
+    try:
+        tools = get_cached_mcp_tools()
+        return tools
+    except Exception as e:
+        print(f"[lsp] ⚠ 无法加载 MCP 工具: {e}")
+        return []
+
+
+def _call_with_lsp(messages: list, model_name: str = "deepseek-v4", max_turns: int = 3) -> str:
+    """Call model with LSP tools bound. Handles tool call loop automatically.
+
+    这是解决 B1/B2 的关键：模型可以调用 lean_goal/lean_local_search 等 LSP 工具
+    来获取精确目标状态和搜索引理，最后才返回文本回答。
+    """
+    tools = _get_lsp_tools()
+    model = create_chat_model(model_name).bind_tools(tools) if tools else create_chat_model(model_name)
+
+    history = list(messages)
+    for turn in range(max_turns):
+        response = model.invoke(history)
+        history.append(response)
+
+        # 检查是否有工具调用
+        if not getattr(response, "tool_calls", None):
+            # 无工具调用 → 返回文本
+            return str(response.content) if response.content else ""
+
+        # 执行工具调用
+        for tc in response.tool_calls:
+            tool = next((t for t in tools if t.name == tc["name"]), None)
+            if tool:
+                try:
+                    result = tool.invoke(tc["args"])
+                    result_str = str(result)[:3000]  # 限制长度
+                except Exception as e:
+                    result_str = f"Tool error: {e}"
+                history.append(ToolMessage(content=result_str, tool_call_id=tc["id"]))
+            else:
+                history.append(ToolMessage(
+                    content=f"Unknown tool: {tc['name']}",
+                    tool_call_id=tc["id"],
+                ))
+
+    # 超限后返回最后的文本
+    return str(response.content) if response.content else ""
 
 
 def _extract_goal(ws: str, f: str, line_str: str) -> dict:
@@ -779,12 +838,12 @@ def prover(state: ArchonState) -> ArchonState:
         if tactics_used:
             print(f"[prove] 级联部分解决 ({tactics_used}), LLM 接手其余")
         
-        # ── 主尝试 ──
-        resp = _model().invoke([
+        # ── 主尝试（带 LSP 工具绑定） ──
+        resp_text = _call_with_lsp([
             SystemMessage(content=sys_instructions),
             HumanMessage(content=user_content),
         ])
-        code = _extract(str(resp.content))
+        code = _extract(resp_text)
         
         strategy_used = "direct_llm"
         result_status = ""

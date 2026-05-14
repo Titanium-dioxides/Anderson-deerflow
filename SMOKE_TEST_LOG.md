@@ -56,6 +56,50 @@
 
 ---
 
+## 2026-05-14 21:07
+
+### 测试范围
+- [L0] 语法检查
+- [L1] MCP 工具加载 + LSP 关键工具可达性
+- [L2] `_get_lsp_tools()` / `_call_with_lsp()` 函数存在性与签名
+- [L3] `model.bind_tools()` 实际工作
+
+### 测试环境
+deer-flow 虚拟环境 + lean-lsp MCP server
+
+### 测试结果
+✅ PASS — 19/19 通过，0/19 失败
+
+### 测试详情
+
+| 被测项 | 用例数 | 关键检查 | 结果 |
+|--------|--------|---------|:----:|
+| 语法检查 | 2 | 两个 graph 文件 | ✅ |
+| MCP 工具加载 | 6 | 22 个工具 + 5 个关键 LSP 工具 | ✅ |
+| 函数存在性 | 4 | 两个文件 × 两个函数 | ✅ |
+| 函数签名 | 2 | _call_with_lsp(messages, max_turns) | ✅ |
+| 实际调用 | 5 | bind_tools → invoke → 返回结果 | ✅ |
+
+### 加载的 LSP 工具（22 个）
+
+| 工具 | 用途 |
+|------|------|
+| `lean_goal` | 获取精确目标状态 |
+| `lean_local_search` | 本地声明搜索（原版 lean_local_search） |
+| `lean_leansearch` | 语义搜索 |
+| `lean_hammer_premise` | 前提建议（exact?/apply? 的 LSP 基础） |
+| `lean_multi_attempt` | 批量测试多个策略 |
+| `lean_diagnostic_messages` | 即时编译错误反馈 |
+| `lean_state_search` | 目标条件引理搜索 |
+| `lean_loogle` | 类型模式搜索 |
+| 其他 15 个 | 悬停信息、文件大纲、代码补全等 |
+
+### B1/B2 状态
+B1 🚧 → ✅ **已解决**：prover 主尝试改用 `_call_with_lsp()`，LLM 可自选调用 LSP 工具
+B2 🚧 → ✅ **已解决**：`lean_hammer_premise` 可用，LLM 可在工具调用后使用 exact/apply
+
+---
+
 ## SSOT 记录
 - `SMOKE_TEST.md` ⬤ → 冒烟测试规范（项目开发准则）
 - `MIGRATION_LOG.md` ⬤ → 代码改动记录（含新准则声明）

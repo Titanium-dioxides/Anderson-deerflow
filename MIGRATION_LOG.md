@@ -12,6 +12,17 @@
 
 ## 2026-05-14
 
+### [b1-b2] 实现 LSP MCP 工具集成 — 解决 B1 + B2
+- **文件:** `overlay/backend/workflows/archon_graph.py`, `overlay/backend/workflows/unified_graph.py`
+- **改动:**
+  - 新增 `_get_lsp_tools()` — 调用 `deerflow.mcp.cache.get_cached_mcp_tools()` 加载 22 个 lean-lsp MCP 工具
+  - 新增 `_call_with_lsp(messages, model_name, max_turns)` — 绑定工具 + 自动处理 tool call 循环（最多 3 轮）
+  - prover 主尝试从 `_model().invoke()` 改为 `_call_with_lsp()`
+- **B1 解除:** prover 节点现在可调 lean_goal/lean_local_search/lean_hammer_premise 等 LSP 工具
+- **B2 解除:** `lean_hammer_premise` 可用 → LLM 可自选使用 exact/apply
+- **加载的 LSP 工具（22 个）:** lean_goal, lean_local_search, lean_leansearch, lean_hammer_premise, lean_multi_attempt, lean_diagnostic_messages, lean_state_search 等
+- **测试:** 19/19 冒烟测试通过
+
 ### [docs-deerflow] 学习 DeerFlow 官方文档后重新评估 BLOCKERS.md
 - **文件:** `BLOCKERS.md` (更新)
 - **学习来源:** `README_zh.md`, `ARCHITECTURE.md`, `MCP_SERVER.md`, `tools/tools.py`, `mcp/tools.py`, `agents/lead_agent/agent.py`, `subagents/`

@@ -49,9 +49,10 @@ from typing import Annotated, Literal
 
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
 from deerflow.models import create_chat_model
+from deerflow.mcp.cache import get_cached_mcp_tools
 
 
 # ── 路径常量 ──────────────────────────────────────────────────────────
@@ -258,6 +259,42 @@ def _format_errors(errors: list[dict], max_lines: int = 40) -> str:
     if len(combined) > max_lines * 80:
         combined = combined[:max_lines * 80] + "\n... (truncated)"
     return combined
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# B1/B2: LSP MCP 工具集成（同步 archon_graph.py）
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def _get_lsp_tools() -> list:
+    try:
+        return get_cached_mcp_tools()
+    except Exception as e:
+        print(f"[lsp] ⚠ 无法加载 MCP 工具: {e}")
+        return []
+
+
+def _call_with_lsp(messages: list, model_name: str = "deepseek-v4", max_turns: int = 3) -> str:
+    """Call model with LSP tools bound. Auto-handles tool calls."""
+    tools = _get_lsp_tools()
+    model = create_chat_model(model_name).bind_tools(tools) if tools else create_chat_model(model_name)
+    history = list(messages)
+    for turn in range(max_turns):
+        response = model.invoke(history)
+        history.append(response)
+        if not getattr(response, "tool_calls", None):
+            return str(response.content) if response.content else ""
+        for tc in response.tool_calls:
+            tool = next((t for t in tools if t.name == tc["name"]), None)
+            if tool:
+                try:
+                    result_str = str(tool.invoke(tc["args"]))[:3000]
+                except Exception as e:
+                    result_str = f"Tool error: {e}"
+                history.append(ToolMessage(content=result_str, tool_call_id=tc["id"]))
+            else:
+                history.append(ToolMessage(content=f"Unknown: {tc['name']}", tool_call_id=tc["id"]))
+    return str(response.content) if response.content else ""
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -764,11 +801,11 @@ def prover_node(state: UnifiedState) -> UnifiedState:
             f"将文件中的 `sorry` 替换为正确且完整的 Lean 证明。"
             f"{goal_ctx}{rethlas_ctx}{planner_hint}{mode_ctx}"
         )
-        resp = _model().invoke([
+        resp_text = _call_with_lsp([
             SystemMessage(content=sys_msg),
             HumanMessage(content=f"文件 {f}:\n```lean\n{file_content}\n```"),
         ])
-        code = _extract_code(str(resp.content))
+        code = _extract_code(resp_text)
         result_status = ""
         lean_error = ""
 

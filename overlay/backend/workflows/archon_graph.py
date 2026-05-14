@@ -11,6 +11,7 @@ Archon DeerFlow — 增强版 Plan Agent
 节点：planner (增强) → prover (增强) → reviewer (增强)
 """
 
+import concurrent.futures
 import datetime
 import json
 import os
@@ -296,61 +297,207 @@ _SEARCH_URL = "https://leansearch.net/thm/search"
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# B1/B2: LSP MCP 工具集成
+# Y2/Y6: DeerFlow 工具集成 + 安全调用
 # ═══════════════════════════════════════════════════════════════════════
 
 
-def _get_lsp_tools() -> list:
-    """Get LSP MCP tools from DeerFlow's tool system.
+_PATHS: dict[str, Path] = {}  # G3: 路径缓存
 
-    返回 lean-lsp MCP 服务器暴露的所有 LangChain BaseTool。
-    包括：lean_goal, lean_local_search, lean_leansearch, lean_hammer_premise 等。
+
+def _resolve_path(name: str, default: Path) -> Path:
+    """G3: 可配置路径解析。从环境变量读取，失败则返回默认值。"""
+    if name not in _PATHS:
+        env_val = os.environ.get(f"ARCHON_{name.upper()}_PATH")
+        if env_val:
+            _PATHS[name] = Path(env_val)
+        else:
+            _PATHS[name] = default
+    return _PATHS[name]
+
+
+def _get_all_tools() -> list:
+    """Y2: 获取 DeerFlow 所有可用工具（含 sandbox + MCP + builtin）。
+
+    替代 `_get_lsp_tools()`：通过 `get_available_tools()` 统一入口获取
+    sandbox 工具（read_file/write_file/bash）、配置工具（web_search）、
+    MCP 工具（lean-lsp）等全部 34 个工具。
     """
     try:
-        tools = get_cached_mcp_tools()
-        return tools
+        from deerflow.tools import get_available_tools
+        tools = get_available_tools()
+        return tools if tools else []
     except Exception as e:
-        print(f"[lsp] ⚠ 无法加载 MCP 工具: {e}")
-        return []
+        print(f"[tools] ⚠ 无法加载 DeerFlow 工具: {e}")
+        # 回退到纯 MCP 工具
+        try:
+            return get_cached_mcp_tools()
+        except Exception:
+            return []
 
 
-def _call_with_lsp(messages: list, model_name: str | None = None, max_turns: int = 3) -> str:
-    """Call model with LSP tools bound. Handles tool call loop automatically.
+def _safe_invoke(messages: list, model_name: str | None = None,
+                 max_turns: int = 3, retries: int = 2) -> str:
+    """Y6: 安全模型调用，含重试 + 超时保护。
 
-    这是解决 B1/B2 的关键：模型可以调用 lean_goal/lean_local_search 等 LSP 工具
-    来获取精确目标状态和搜索引理，最后才返回文本回答。
+    用 `get_all_tools()` 绑定全部 34 个 DeerFlow 工具（Y2），
+    自动处理 tool call 循环，失败时自动重试。
     """
-    tools = _get_lsp_tools()
+    tools = _get_all_tools()
     model = create_chat_model(model_name).bind_tools(tools) if tools else create_chat_model(model_name)
 
-    history = list(messages)
-    for turn in range(max_turns):
-        response = model.invoke(history)
-        history.append(response)
+    for attempt in range(retries + 1):
+        try:
+            history = list(messages)
+            for turn in range(max_turns):
+                response = model.invoke(history)
+                history.append(response)
 
-        # 检查是否有工具调用
-        if not getattr(response, "tool_calls", None):
-            # 无工具调用 → 返回文本
+                if not getattr(response, "tool_calls", None):
+                    return str(response.content) if response.content else ""
+
+                for tc in response.tool_calls:
+                    tool = next((t for t in tools if t.name == tc["name"]), None)
+                    if tool:
+                        try:
+                            result_str = str(tool.invoke(tc["args"]))[:3000]
+                        except Exception as e:
+                            result_str = f"Tool error: {e}"
+                        history.append(ToolMessage(content=result_str, tool_call_id=tc["id"]))
+                    else:
+                        history.append(ToolMessage(
+                            content=f"Unknown tool: {tc['name']}",
+                            tool_call_id=tc["id"],
+                        ))
+
             return str(response.content) if response.content else ""
+        except Exception as e:
+            if attempt < retries:
+                print(f"[safe] ⚠ 调用失败 (attempt {attempt+1}/{retries+1}): {e}")
+                continue
+            print(f"[safe] ❌ 调用失败 ({retries+1} 次重试耗尽): {e}")
+            return ""
 
-        # 执行工具调用
-        for tc in response.tool_calls:
-            tool = next((t for t in tools if t.name == tc["name"]), None)
-            if tool:
-                try:
-                    result = tool.invoke(tc["args"])
-                    result_str = str(result)[:3000]  # 限制长度
-                except Exception as e:
-                    result_str = f"Tool error: {e}"
-                history.append(ToolMessage(content=result_str, tool_call_id=tc["id"]))
-            else:
-                history.append(ToolMessage(
-                    content=f"Unknown tool: {tc['name']}",
-                    tool_call_id=tc["id"],
-                ))
 
-    # 超限后返回最后的文本
-    return str(response.content) if response.content else ""
+# ═══════════════════════════════════════════════════════════════════════
+# G1: 并行文件证明（concurrent.futures）
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def _prove_single_file(ws: str, f: str, line: str, hint: str,
+                       fail_modes: list, goal_sig: str,
+                       sys_instructions: str, loop_count: int) -> dict:
+    """G1: 单个文件的证明流程，供 ThreadPoolExecutor 调用。
+
+    返回 attempt 记录字典，而非修改共享状态。
+    主线程负责将结果合并到 state。
+    """
+    from deerflow.models import create_chat_model
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    path = Path(ws) / f
+    if not path.exists():
+        return {"file": f, "line": line, "result": "skipped", "note": "file not found"}
+
+    content = path.read_text()
+    if "sorry" not in content:
+        return {"file": f, "line": line, "result": "no_sorries"}
+
+    # 级联
+    cascade_ok, tactics = _try_tactics_cascade_all(ws, f)
+    if cascade_ok:
+        return {
+            "file": f, "line": line, "loop": loop_count,
+            "strategy": f"tactics_cascade:{','.join(tactics)}",
+            "result": "success", "lean_error": "", "failure_mode": "",
+        }
+
+    # 剩余 sorries → LLM
+    content = Path(ws, f).read_text()
+    if "sorry" not in content:
+        return {"file": f, "line": line, "result": "no_sorries"}
+
+    user_content = f"File {f}:\n```lean\n{content}\n```"
+    if hint:
+        user_content = (
+            f"根据以下非形式化证明指引填充该文件的 `sorry`。\n\n"
+            f"## 证明指引\n{hint}\n\n"
+            f"## 文件 {f}:\n```lean\n{content}\n```"
+        )
+
+    resp_text = _safe_invoke([
+        SystemMessage(content=sys_instructions),
+        HumanMessage(content=user_content),
+    ])
+    if not resp_text:
+        return {"file": f, "line": line, "loop": loop_count,
+                "strategy": "llm_failed", "result": "abandoned",
+                "lean_error": "_safe_invoke returned empty", "failure_mode": "llm_error"}
+
+    code = _extract(resp_text)
+    if code and "sorry" not in code:
+        _write(ws, f, code)
+        ok, verrors = _verify_file(ws, f)
+        if ok:
+            return {
+                "file": f, "line": line, "loop": loop_count,
+                "strategy": f"llm_with_hints" if hint else "llm",
+                "result": "success", "lean_error": "", "failure_mode": "",
+            }
+        else:
+            # 失败 → reasoner
+            return _prove_with_reasoner(ws, f, line, hint, fail_modes,
+                                        goal_sig, loop_count, code, _format_errors(verrors))
+
+    return {"file": f, "line": line, "loop": loop_count,
+            "strategy": "llm", "result": "abandoned",
+            "lean_error": "no_valid_code", "failure_mode": ""}
+
+
+def _prove_with_reasoner(ws, f, line, hint, fail_modes, goal_sig, loop_count, code, lean_error):
+    """Reasoner fallback for a single file (extracted for G1)."""
+    print(f"[prove] ⚠ {f} stuck, calling reasoner...")
+    reasoner_prompt = f"Prove this in Lean:\n{_read(ws, f)}\n\n"
+    if goal_sig:
+        reasoner_prompt += f"## 目标定理\n{goal_sig}\n\n"
+    if lean_error:
+        reasoner_prompt += f"## Lean 编译错误（结构化）\n{lean_error}\n\n"
+    if hint:
+        reasoner_prompt += f"## 证明指引\n{hint}\n\n"
+
+    hint_resp = _model(think=True).invoke([
+        SystemMessage(content="Provide an informal proof sketch in natural language."),
+        HumanMessage(content=reasoner_prompt),
+    ])
+
+    fallback_prompt = "Use the informal hint to fill the `sorry` with correct Lean code."
+    if fail_modes:
+        fallback_prompt += f"\n\n避免之前的失败模式: {', '.join(fail_modes)}"
+
+    resp2 = _safe_invoke([
+        SystemMessage(content=fallback_prompt),
+        HumanMessage(content=f"Hint:\n{hint_resp.content}\n\nFile:\n```lean\n{_read(ws, f)}\n```"),
+    ])
+    code2 = _extract(resp2)
+
+    if code2 and "sorry" not in code2:
+        _write(ws, f, code2)
+        ok, verrors2 = _verify_file(ws, f)
+        if ok:
+            return {
+                "file": f, "line": line, "loop": loop_count,
+                "strategy": "reasoner_fallback",
+                "result": "success", "lean_error": "", "failure_mode": "",
+            }
+        else:
+            return {"file": f, "line": line, "loop": loop_count,
+                    "strategy": "reasoner_fallback",
+                    "result": "build_failed", "lean_error": _format_errors(verrors2),
+                    "failure_mode": ",".join(_classify_failure({"result": "build_failed", "lean_error": lean_error}))}
+
+    return {"file": f, "line": line, "loop": loop_count,
+            "strategy": "llm_then_reasoner",
+            "result": "abandoned", "lean_error": "no_valid_code",
+            "failure_mode": ",".join(_classify_failure({"result": "abandoned", "lean_error": ""}))}
 
 
 def _extract_goal(ws: str, f: str, line_str: str) -> dict:
@@ -813,215 +960,86 @@ def planner(state: ArchonState) -> ArchonState:
 
 def prover(state: ArchonState) -> ArchonState:
     """
-    增强版 Prover：
-    1. 使用 planner 生成的非形式化指引
-    2. 根据失败模式调整策略
-    3. 记录每次尝试到 attempt_history
+    并行 Prover（G1）：使用 ThreadPoolExecutor 处理多个文件。
+    合并 Y2/Y6 的安全调用 + 重试机制。
     """
     ws = state["workspace_path"]
     pending = state.get("pending", [])
     hints = state.get("informal_hints", {})
     failure_modes = state.get("failure_modes", {})
-    done = []
+    loop_count = state["loop_count"]
 
-    for t in pending:
-        f = t["file"]
-        path = Path(ws) / f
-        if not path.exists():
-            continue
+    if not pending:
+        state["stage"] = "PROVER"
+        return state
 
-        content = path.read_text()
-        if "sorry" not in content:
-            done.append(f)
-            continue
+    # G1: 并行度 = 文件数（但不超过 4）
+    max_workers = min(len(pending), 4)
+    print(f"[prove] 并行处理 {len(pending)} 个文件 (workers={max_workers})")
 
-        line = t.get("line", "?")
-        print(f"[prove] === {f} (line {line}) ===")
+    # 预构建 sys_instructions（文件无关部分）
+    base_sys = "Fill every `sorry` with a correct Lean 4 proof. "
+    base_sys += "Return ONLY the complete file content. "
+    base_sys += "Do NOT change anything outside the `sorry` blocks."
+    if _DEFAULT_SKILL:
+        base_sys += f"\n\n## 技能参考\n{_DEFAULT_SKILL[:2000]}"
 
-        # ── 提取精确目标 ──
-        goal = _extract_goal(ws, f, line)
-        goal_sig = goal.get("signature", "")
-        goal_ctx = f"\n需要填充 {f}:{line} 的 `sorry`。目标定理签名:\n```lean\n{goal_sig}\n```" if goal_sig else ""
-        
-        # ── 检查当前文件是否有非形式化指引 ──
-        hint = hints.get(f, "")
-        fail_modes = failure_modes.get(f, [])
-        
-        # ── 注入技能内容（R4 修复）+ 根据失败模式调整 ──
-        sys_instructions = "Fill every `sorry` with a correct Lean 4 proof. "
-        sys_instructions += "Return ONLY the complete file content. "
-        sys_instructions += "Do NOT change anything outside the `sorry` blocks."
-        if _DEFAULT_SKILL:
-            sys_instructions += f"\n\n## 技能参考\n{_DEFAULT_SKILL[:2000]}"
-        
-        if "missing_infrastructure" in fail_modes:
-            sys_instructions += (
-                "\n\n注意: 之前的尝试遇到了 Mathlib 中缺少所需基础设施的问题。"
-                "不要依赖可能不存在的引理。"
-                "如果标准方法不可行，请查阅 mathlib 中可用的等效工具，"
-                "或者自己构造基础证明（induction/recursion）。"
-            )
-        
-        if "typeclass" in fail_modes:
-            sys_instructions += (
-                "\n\n注意: 之前的尝试遇到了类型类合成失败。"
-                "请确保显式提供所需实例（haveI/letI）。"
-                "或者在证明块内构造临时实例。"
-            )
-        
-        if "wrong_construction" in fail_modes:
-            sys_instructions += (
-                "\n\n注意: 之前的尝试使用了错误的构造/类型。"
-                "请重新检查类型签名，确保使用的构造与声明类型一致。"
-            )
-        
-        if "early_stopping" in fail_modes:
-            sys_instructions += (
-                "\n\n注意: 之前的尝试过早放弃了。"
-                "这个证明是可完成的。请尝试不同的策略。"
-                "如果卡住，将问题分解为更小的子目标逐一解决。"
-            )
-        
-        # ── 注入非形式化指引 ──
-        user_content = f"File {f}:\n```lean\n{content}\n```"
-        
-        if hint:
-            # 在 HumanMessage 中包含指引
-            user_content = (
-                f"根据以下非形式化证明指引填充该文件的 `sorry`。\n\n"
-                f"## 证明指引\n{hint}\n\n"
-                f"## 文件 {f}:\n```lean\n{content}\n```"
-            )
-            print(f"[prove] 使用 planner 指引: {hint[:80]}...")
-        
-        # ── Phase 3: 先试自动化策略级联 ──
-        cascade_ok, tactics_used = _try_tactics_cascade_all(ws, f)
-        if cascade_ok:
-            print(f"[prove] ✅ {f} 全部通过自动化策略: {tactics_used}")
-            done.append(f)
-            state["attempt_history"].append({
-                "file": f, "line": line, "loop": state["loop_count"],
-                "strategy": f"tactics_cascade:{','.join(tactics_used)}",
-                "result": "success", "lean_error": "", "failure_mode": "",
-            })
-            continue
-        
-        # 级联未完全解决 → 用 LLM 处理剩余 sorries
-        content = _read(ws, f)  # 重新读取（级联可能已解决部分 sorry）
-        if "sorry" not in content:
-            done.append(f)
-            continue
-        if tactics_used:
-            print(f"[prove] 级联部分解决 ({tactics_used}), LLM 接手其余")
-        
-        # ── 主尝试（带 LSP 工具绑定） ──
-        resp_text = _call_with_lsp([
-            SystemMessage(content=sys_instructions),
-            HumanMessage(content=user_content),
-        ])
-        code = _extract(resp_text)
-        
-        strategy_used = "direct_llm"
-        result_status = ""
-        lean_error = ""
-
-        if code and "sorry" not in code:
-            _write(ws, f, code)
-            ok, verrors = _verify_file(ws, f)
-            if ok:
-                print(f"[prove] ✅ {f} (per-file lean)")
-                done.append(f)
-                state["attempt_history"].append({
-                    "file": f, "line": line, "loop": state["loop_count"],
-                    "strategy": "direct_llm_with_hints" if hint else "direct_llm",
-                    "result": "success",
-                    "lean_error": "",
-                    "failure_mode": "",
-                })
+    futures = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        for t in pending:
+            f = t["file"]
+            path = Path(ws) / f
+            if not path.exists():
                 continue
-            else:
-                result_status = "build_failed"
-                lean_error = _format_errors(verrors)
-                print(f"[prove] ⚠ {f} per-file lean failed ({len(verrors)} error(s))")
-        else:
-            result_status = "no_valid_code"
-            lean_error = "LLM did not return valid Lean code"
-        
-        # ── 卡住 → 推理模型 fallback（结构化错误） ──
-        print(f"[prove] ⚠ {f} stuck, calling reasoner...")
-        
-        reasoner_prompt = f"Prove this in Lean:\n{_read(ws, f)}\n\n"
-        if goal_sig:
-            reasoner_prompt += f"## 目标定理\n{goal_sig}\n\n"
-        if lean_error:
-            reasoner_prompt += f"## Lean 编译错误（结构化）\n{lean_error}\n\n"
-        if hint:
-            reasoner_prompt += f"## 证明指引\n{hint}\n\n"
-        
-        hint_resp = _model(think=True).invoke([
-            SystemMessage(content="Provide an informal proof sketch in natural language."),
-            HumanMessage(content=reasoner_prompt),
-        ])
-        
-        print(f"[prove] reasoner hint: {str(hint_resp.content)[:100]}...")
-
-        # Fallback 尝试（携带结构化错误）
-        fallback_prompt = "Use the informal hint to fill the `sorry` with correct Lean code."
-        if fail_modes:
-            fallback_prompt += f"\n\n避免之前的失败模式: {', '.join(fail_modes)}"
-        if lean_error and result_status == "build_failed":
-            fallback_prompt += f"\n\n之前的 Lean 错误:\n{lean_error}"
-        
-        resp2 = _model().invoke([
-            SystemMessage(content=fallback_prompt),
-            HumanMessage(content=f"Hint:\n{hint_resp.content}\n\nFile:\n```lean\n{_read(ws, f)}\n```"),
-        ])
-        code2 = _extract(str(resp2.content))
-        
-        if code2 and "sorry" not in code2:
-            _write(ws, f, code2)
-            ok, verrors2 = _verify_file(ws, f)
-            if ok:
-                print(f"[prove] ✅ {f} (retry, per-file lean)")
-                done.append(f)
-                state["attempt_history"].append({
-                    "file": f, "line": line, "loop": state["loop_count"],
-                    "strategy": "reasoner_fallback" + ("_with_hints" if hint else ""),
-                    "result": "success",
-                    "lean_error": "",
-                    "failure_mode": "",
-                })
+            if "sorry" not in path.read_text():
                 continue
-            else:
-                result_status = "build_failed"
-                lean_error = _format_errors(verrors2)
-                print(f"[prove] ❌ {f} retry per-file lean failed ({len(verrors2)} error(s))")
-        else:
-            result_status = "abandoned"
-            print(f"[prove] ❌ {f} failed, no valid code from retry")
-        
-        # ── 记录失败尝试 ──
-        failure_mode_str = ",".join(_classify_failure({
-            "result": result_status,
-            "lean_error": lean_error,
-        }))
-        state["attempt_history"].append({
-            "file": f, "line": line, "loop": state["loop_count"],
-            "strategy": strategy_used + "_then_reasoner",
-            "result": result_status,
-            "lean_error": lean_error,
-            "failure_mode": failure_mode_str,
-        })
 
-    state["completed"].extend(done)
-    state["pending"] = [t for t in pending if t["file"] not in done]
-    
-    # 总结
-    if done:
-        print(f"[prove] 本轮完成: {len(done)}/{len(pending)} 个 sorry")
-    if state.get("pending"):
-        print(f"[prove] 剩余: {len(state['pending'])} 个 sorry")
-    
+            line = t.get("line", "?")
+            goal = _extract_goal(ws, f, line)
+            goal_sig = goal.get("signature", "")
+            hint = hints.get(f, "")
+            fail_modes = failure_modes.get(f, [])
+
+            # 构建文件级 sys_instructions（含失败模式调整）
+            sys_inst = base_sys
+            if "missing_infrastructure" in fail_modes:
+                sys_inst += "\n\n注意: 尝试 induction/recursion 基础方法，勿依赖可能不存在的引理。"
+            if "typeclass" in fail_modes:
+                sys_inst += "\n\n注意: 显式提供 haveI/letI 实例。"
+            if "wrong_construction" in fail_modes:
+                sys_inst += "\n\n注意: 重新检查类型签名。"
+            if "early_stopping" in fail_modes:
+                sys_inst += "\n\n注意: 分解为更小子目标。"
+
+            future = executor.submit(
+                _prove_single_file, ws, f, line, hint, fail_modes,
+                goal_sig, sys_inst, loop_count
+            )
+            futures.append((f, future))
+
+        # 收集结果
+        for f, future in futures:
+            try:
+                result = future.result(timeout=300)
+                state["attempt_history"].append(result)
+                if result.get("result") == "success" or result.get("result") == "no_sorries":
+                    state["completed"].append(f)
+                    print(f"[prove] ✅ {f}")
+                else:
+                    print(f"[prove] ❌ {f}: {result.get('failure_mode', 'unknown')}")
+            except Exception as e:
+                print(f"[prove] ❌ {f}: 并行执行异常: {e}")
+                state["attempt_history"].append({
+                    "file": f, "loop": loop_count,
+                    "strategy": "parallel", "result": "error",
+                    "lean_error": str(e)[:500], "failure_mode": "executor_error",
+                })
+
+    # 更新 pending
+    completed_set = set(state["completed"])
+    state["pending"] = [t for t in pending if t["file"] not in completed_set]
+
+    print(f"[prove] 本轮: {len(state['completed'])} 完成, {len(state['pending'])} 剩余")
     return state
 
 

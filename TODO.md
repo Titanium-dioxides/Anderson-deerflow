@@ -44,6 +44,14 @@
 ### ~~Y3. 模型名称硬编码~~ ✅ 2026-05-14
 - `_model()` 默认 `None` → `_get_model_name()` 从 `get_app_config()` 读取
 
+### ~~Y2. 手动工具获取~~ ✅ 2026-05-14
+- `_get_lsp_tools()` → `_get_all_tools()` 使用 `get_available_tools()`
+- `_call_with_lsp()` → `_safe_invoke()` 含重试机制
+
+### ~~Y6. 错误处理~~ ✅ 2026-05-14（部分）
+- `_safe_invoke()` 含 retries 参数
+- `ThreadPoolExecutor` 含 timeout 保护
+
 ### Y4. 无 ThreadState 集成
 - **描述:** `ArchonState(dict)` 自定义状态，未使用 `ThreadState(AgentState)`
 - **影响:** 无 checkpoint、无消息持久化
@@ -98,3 +106,7 @@
 | 2026-05-14 | R4 | Skills 内容注入 SystemMessage |
 | 2026-05-14 | Y3 | 模型名从 config 读取 |
 | 2026-05-14 | G4 | 确认已原生注册到 deer-flow langgraph.json |
+| 2026-05-14 | Y2 | _get_lsp_tools() → _get_all_tools() |
+| 2026-05-14 | Y6 | _safe_invoke() 安全调用含重试 |
+| 2026-05-14 | G1 | ThreadPoolExecutor 并行证明 |
+| 2026-05-14 | G3 | _resolve_path() 可配置路径 |

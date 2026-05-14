@@ -84,3 +84,15 @@
   - **reviewer/reviewer_node 保留 `_build(ws)`** 用于最终全量编译验证（只有此处用全量）
 - **原版对应:** 恢复原 Archon 三级验证阶梯中的第一级（per-file `lake env lean`）和第二级（结构化错误 → LLM 引导修复）
 - **效果:** 单文件验证从 5-30s 降至 ~1-2s，错误信息从原始字符串变为结构化格式
+
+### [Phase 2: 目标提取 + Mathlib 搜索](#)
+- **文件:** `overlay/backend/workflows/archon_graph.py`, `overlay/backend/workflows/unified_graph.py`
+- **原状:** prover 接收整个 .lean 文件做证明，planner 只传 sorry 上下文给 LLM，无精确目标信息
+- **改动:**
+  - **新增 `_extract_goal(ws, f, line_str)`** — 解析 .lean 文件，从 sorry 位置向上扫描找到 enclosing theorem/lemma/def/example/instance/corollary 声明，提取其签名（最多 30 行）。使用 `re.compile(r'^\s*(theorem|lemma|def|example|instance|corollary|class|structure|abbrev)\b')` 匹配声明起始
+  - **planner 增强：** 对每个 sorry 提取精确目标签名 → 注入到 planner prompt 中（`## 每个 sorry 的精确定理签名`），并在 planner 中调用 `_search_mathlib()` 搜索相关定理 → 注入到 prompt（`## Mathlib 相关定理`）
+  - **prover 增强：** SystemMessage 和 reasoner prompt 都添加 `goal_ctx` 块，包含填充目标的定理签名
+  - **`_search_mathlib(query)`** — 新增到 archon_graph.py，调用 leansearch.net API 搜索相关定理
+  - **`unified_graph.py` 修复 `_search()`** — resp.read() 调用顺序修复（先 read 再 decode）
+- **原版对应:** 恢复原 Archon 的 `lean_goal(file, line)` 获取精确目标的能力（通过文件扫描模拟），以及 `lean_leansearch()` / `lean_local_search()` 的搜索能力（通过 leansearch.net API 模拟）
+- **效果:** LLM 不再猜测目标类型，每次证明请求都包含精确定理签名；planner 可获得 mathlib 中已知相关定理作为参考

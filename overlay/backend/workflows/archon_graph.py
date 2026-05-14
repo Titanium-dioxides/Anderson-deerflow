@@ -213,6 +213,104 @@ def _format_errors(errors: list[dict], max_lines: int = 40) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# Phase 2：目标提取 + 语义搜索
+# ═══════════════════════════════════════════════════════════════════════
+
+
+_SEARCH_URL = "https://leansearch.net/thm/search"
+
+
+def _extract_goal(ws: str, f: str, line_str: str) -> dict:
+    """Extract the theorem/lemma context around a sorry.
+
+    Scans backward from the sorry line to find the enclosing
+    theorem/lemma/def declaration, then returns its signature
+    and surrounding context lines.
+
+    Returns: {"signature": str, "line": int, "source_lines": [str]}
+    """
+    try:
+        target_line = int(line_str)
+    except (ValueError, TypeError):
+        return {"signature": "", "line": 0, "source_lines": []}
+
+    path = Path(ws) / f
+    if not path.exists():
+        return {"signature": "", "line": 0, "source_lines": []}
+
+    lines = path.read_text().split("\n")
+
+    # Scan backward from target_line to find declaration start
+    # Matching: theorem | lemma | def | example | instance | corollary
+    decl_start = -1
+    decl_pattern = re.compile(
+        r'^\s*(theorem|lemma|def|example|instance|corollary|class|structure|abbrev)\b'
+    )
+    for i in range(min(target_line, len(lines)) - 1, -1, -1):
+        if decl_pattern.match(lines[i]):
+            decl_start = i
+            break
+
+    if decl_start == -1:
+        return {"signature": "", "line": target_line, "source_lines": lines}
+
+    # Collect declaration lines until the next declaration or blank line
+    decl_lines = []
+    for i in range(decl_start, min(decl_start + 30, len(lines))):
+        decl_lines.append(lines[i])
+        if i >= target_line - 1:
+            break
+        # Stop if we see the start of a new declaration at same or less indent
+        if i > decl_start and decl_pattern.match(lines[i]):
+            break
+
+    signature = "\n".join(decl_lines).strip()
+
+    # Context: 5 lines before decl, 5 lines after the sorry
+    ctx_before = lines[max(0, decl_start - 5):decl_start]
+    ctx_after = lines[target_line:min(target_line + 5, len(lines))]
+
+    return {
+        "signature": signature,
+        "line": target_line,
+        "source_lines": ctx_before + ["--- [declaration] ---"] + decl_lines + ["--- [after sorry] ---"] + ctx_after,
+    }
+
+
+def _search_mathlib(query: str, max_results: int = 5) -> list[dict]:
+    """Search mathlib for theorems related to the query via leansearch.net."""
+    try:
+        import ssl
+        import urllib.request
+        ctx = ssl.create_default_context()
+        req = urllib.request.Request(
+            _SEARCH_URL,
+            data=json.dumps({
+                "query": query,
+                "task": "retrieve useful theorems",
+                "num_results": max_results,
+            }).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, context=ctx, timeout=10) as resp:
+            return json.loads(resp.read().decode()) if resp.readable() else []
+    except Exception:
+        return []
+
+
+def _goal_context(goals: list[dict]) -> str:
+    """Format extracted goals into an LLM-readable context block."""
+    lines = ["## 单文件目标分解\n"]
+    for i, g in enumerate(goals):
+        if not g.get("signature"):
+            continue
+        lines.append(f"### 目标 {i+1}: {g['file']}:{g['line']}")
+        lines.append(f"```lean\n{g['signature']}\n```")
+        lines.append("")
+    return "\n".join(lines)
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # 失败模式分类
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -326,14 +424,43 @@ def planner(state: ArchonState) -> ArchonState:
     
     user_hint_text = state.get("user_hints", "")
     
-    # ── 3. 让模型生成指引 ──
+    # ── 3. 提取每个 sorry 的精确目标 ──
+    goals = []
+    for s in sorries:
+        g = _extract_goal(ws, s["file"], s["line"])
+        if g.get("signature"):
+            goals.append({"file": s["file"], "line": s["line"], "signature": g["signature"]})
+    
+    # ── 4. 搜索 mathlib（用第一个 sorry 的上下文作为查询词） ──
+    search_results = []
+    if sorries:
+        first_goal = goals[0]["signature"][:100] if goals else sorries[0]["context"][:100]
+        raw_results = _search_mathlib(first_goal, max_results=3)
+        if raw_results:
+            for r in raw_results[:3]:
+                thm = r.get("theorem", "") or r.get("title", "")
+                if thm and len(thm) < 500:
+                    search_results.append(f"- {thm}")
+    
+    # ── 5. 让模型生成指引 ──
     prompt_parts = [
         f"## 项目文件\n{files}",
         f"\n## 待填充的 sorry\n" + "\n".join(s["context"] for s in sorries),
     ]
     
+    # 添加精确目标上下文
+    if goals:
+        goal_lines = []
+        for g in goals:
+            goal_lines.append(f"### {g['file']}:{g['line']}")
+            goal_lines.append(f"```lean\n{g['signature']}\n```")
+        prompt_parts.append(f"\n## 每个 sorry 的精确定理签名（不要修改 signature 以外的内容）\n" + "\n".join(goal_lines))
+    
     if failure_context:
         prompt_parts.append(f"\n## 历史失败记录（不要重复尝试这些策略）\n{failure_context}")
+    
+    if search_results:
+        prompt_parts.append(f"\n## Mathlib 相关定理（来自 leansearch.net）\n" + "\n".join(search_results))
     
     if user_hint_text:
         prompt_parts.append(f"\n## 用户提示\n{user_hint_text}")
@@ -443,6 +570,11 @@ def prover(state: ArchonState) -> ArchonState:
         line = t.get("line", "?")
         print(f"[prove] === {f} (line {line}) ===")
 
+        # ── 提取精确目标 ──
+        goal = _extract_goal(ws, f, line)
+        goal_sig = goal.get("signature", "")
+        goal_ctx = f"\n需要填充 {f}:{line} 的 `sorry`。目标定理签名:\n```lean\n{goal_sig}\n```" if goal_sig else ""
+        
         # ── 检查当前文件是否有非形式化指引 ──
         hint = hints.get(f, "")
         fail_modes = failure_modes.get(f, [])
@@ -529,6 +661,8 @@ def prover(state: ArchonState) -> ArchonState:
         print(f"[prove] ⚠ {f} stuck, calling reasoner...")
         
         reasoner_prompt = f"Prove this in Lean:\n{_read(ws, f)}\n\n"
+        if goal_sig:
+            reasoner_prompt += f"## 目标定理\n{goal_sig}\n\n"
         if lean_error:
             reasoner_prompt += f"## Lean 编译错误（结构化）\n{lean_error}\n\n"
         if hint:

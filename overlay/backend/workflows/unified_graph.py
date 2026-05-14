@@ -260,6 +260,45 @@ def _format_errors(errors: list[dict], max_lines: int = 40) -> str:
     return combined
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# Phase 2：目标提取（同步 archon_graph.py）
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def _extract_goal(ws: str, f: str, line_str: str) -> dict:
+    """Extract the theorem/lemma context around a sorry."""
+    try:
+        target_line = int(line_str)
+    except (ValueError, TypeError):
+        return {"signature": "", "line": 0, "source_lines": []}
+    path = Path(ws) / f
+    if not path.exists():
+        return {"signature": "", "line": 0, "source_lines": []}
+    lines = path.read_text().split("\n")
+    decl_pattern = re.compile(
+        r'^\s*(theorem|lemma|def|example|instance|corollary|class|structure|abbrev)\b'
+    )
+    decl_start = -1
+    for i in range(min(target_line, len(lines)) - 1, -1, -1):
+        if decl_pattern.match(lines[i]):
+            decl_start = i
+            break
+    if decl_start == -1:
+        return {"signature": "", "line": target_line, "source_lines": lines}
+    decl_lines = []
+    for i in range(decl_start, min(decl_start + 30, len(lines))):
+        decl_lines.append(lines[i])
+        if i >= target_line - 1:
+            break
+        if i > decl_start and decl_pattern.match(lines[i]):
+            break
+    return {
+        "signature": "\n".join(decl_lines).strip(),
+        "line": target_line,
+        "source_lines": decl_lines,
+    }
+
+
 def _search(query: str) -> list[dict]:
     import urllib.request, ssl
     try:
@@ -270,7 +309,8 @@ def _search(query: str) -> list[dict]:
             headers={"Content-Type": "application/json"},
         )
         with urllib.request.urlopen(req, context=ctx, timeout=15) as resp:
-            return json.loads(resp.read().decode()) if resp else []
+            data = resp.read()
+            return json.loads(data.decode()) if data else []
     except Exception:
         return []
 
@@ -473,13 +513,42 @@ def planner_node(state: UnifiedState) -> UnifiedState:
             failure_parts.append(line)
     failure_ctx = "\n".join(failure_parts)
 
+    # ── 提取每个 sorry 的精确目标 ──
+    goals = []
+    for s in sorries:
+        g = _extract_goal(ws, s["file"], s["line"])
+        if g.get("signature"):
+            goals.append({"file": s["file"], "line": s["line"], "signature": g["signature"]})
+
+    # ── 搜索 mathlib ──
+    search_results = []
+    if sorries and goals:
+        query = goals[0]["signature"][:100]
+        raw_results = _search(query)
+        if raw_results:
+            for r in raw_results[:3]:
+                thm = r.get("theorem", "") or r.get("title", "")
+                if thm and len(thm) < 500:
+                    search_results.append(f"- {thm}")
+
     # ── 让模型生成解析和指引 ──
     prompt = (
         f"## 项目文件\n{files}"
         f"\n## 待填充的 sorry\n" + "\n".join(s["context"] for s in sorries)
     )
+
+    if goals:
+        g_lines = []
+        for g in goals:
+            g_lines.append(f"### {g['file']}:{g['line']}\n```lean\n{g['signature']}\n```")
+        prompt += "\n## 每个 sorry 的精确定理签名\n" + "\n".join(g_lines)
+
     if failure_ctx:
         prompt += f"\n## 历史失败\n{failure_ctx}"
+
+    if search_results:
+        prompt += "\n## Mathlib 相关定理\n" + "\n".join(search_results)
+
     prompt += (
         "\n## 任务\n"
         "对每个 sorry，按以下格式输出：\n"
@@ -543,6 +612,11 @@ def prover_node(state: UnifiedState) -> UnifiedState:
         file_content = path.read_text()
         print(f"[archon] prove: {f} (line {line})")
 
+        # ── 提取精确目标 ──
+        goal = _extract_goal(ws, f, line)
+        goal_sig = goal.get("signature", "")
+        goal_ctx = f"\n需要填充 `sorry` 的目标:\n```lean\n{goal_sig}\n```" if goal_sig else ""
+
         # ── 收集指引上下文 ──
         hint = hints.get(f, "")
         fail_modes = failure_modes.get(f, [])
@@ -566,7 +640,7 @@ def prover_node(state: UnifiedState) -> UnifiedState:
         sys_msg = (
             f"你是 Lean4 形式化证明助手。根据给定的指引，"
             f"将文件中的 `sorry` 替换为正确且完整的 Lean 证明。"
-            f"{rethlas_ctx}{planner_hint}{mode_ctx}"
+            f"{goal_ctx}{rethlas_ctx}{planner_hint}{mode_ctx}"
         )
         resp = _model().invoke([
             SystemMessage(content=sys_msg),
@@ -599,6 +673,8 @@ def prover_node(state: UnifiedState) -> UnifiedState:
         # ── 卡住 → 推理模型 fallback（结构化错误） ──
         print(f"[archon] ⚠ {f} stuck, calling reasoner...")
         reasoner_prompt = f"Prove in Lean:\n{_read(ws, f)}"
+        if goal_sig:
+            reasoner_prompt += f"\n\n## Goal\n{goal_sig}"
         if lean_error:
             reasoner_prompt += f"\n\n## Lean Errors (structured)\n{lean_error}"
         if hint:

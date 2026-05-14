@@ -173,3 +173,25 @@ B3 无集成测试环境
 ```
 
 最关键的 blocker：**B1（LSP 工具不可用）阻塞了 B2，但不阻塞其他路径。** 其余任务都可以在当前架构下独立推进。
+
+---
+
+## 四、勘误与更新
+
+### 2026-05-14 勘误：B1 根因判断错误
+
+**原始判断：** "MCP 协议与纯 Python 函数不兼容"
+**实际：** DeerFlow 通过 `deerflow.mcp.tools.get_mcp_tools()` 将 MCP 工具暴露为 LangChain `BaseTool`，可以直接 `model.bind_tools()` 绑定到模型。
+
+**重述 B1：** 不是"MCP 不可用"，而是"graph 节点架构需重构为 tool-calling loop 才能使用 MCP 工具"。
+
+| 更新前 | 更新后 |
+|--------|--------|
+| 🚧 外部依赖：MCP 不兼容 |   Architecture：节点需改为 Agent 模式 |
+| 方案：子进程 spawn | 方案：使用 `get_mcp_tools()` + `model.bind_tools()` + LangGraph `ToolNode` |
+| 可行但复杂 | 标准 LangGraph 模式，但有工作量 |
+
+### 影响
+
+- B2（exact?/apply? 策略）现在也是   Architecture 约束，而非外部依赖
+- 解除 B1 后 B2 自动解除（工具可用后，LLM 可自选使用 exact?/apply?）

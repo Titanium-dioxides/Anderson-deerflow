@@ -991,98 +991,106 @@ def planner(state: ArchonState) -> ArchonState:
 # 节点：prover（增强）
 # ═══════════════════════════════════════════════════════════════════════
 
-
 def prover(state: ArchonState) -> ArchonState:
     """
-    并行 Prover（G1）：使用 ThreadPoolExecutor 处理多个文件。
-    合并 Y2/Y6 的安全调用 + 重试机制。
+    全面拥抱 DeerFlow: 使用 create_deerflow_agent() 来做每个文件的证明。
+    agent 自动获得 sandbox、checkpoint、中间件链、工具循环等。
     """
+    from deerflow.tools import get_available_tools
+
     ws = state["workspace_path"]
     pending = state.get("pending", [])
     hints = state.get("informal_hints", {})
     failure_modes = state.get("failure_modes", {})
     loop_count = state["loop_count"]
-
     if not pending:
-        state["stage"] = "PROVER"
         return state
 
-    # G1: 并行度 = 文件数（但不超过 4）
-    max_workers = min(len(pending), 4)
-    print(f"[prove] 并行处理 {len(pending)} 个文件 (workers={max_workers})")
+    print(f"[prove] 处理 {len(pending)} 个文件 (create_deerflow_agent)")
+    all_tools = get_available_tools()
 
-    # 预构建 sys_instructions（文件无关部分）
-    base_sys = "Fill every `sorry` with a correct Lean 4 proof. "
-    base_sys += "Return ONLY the complete file content. "
-    base_sys += "Do NOT change anything outside the `sorry` blocks."
-    skill_text = _load_skills_deerflow() or _DEFAULT_SKILL
-    if skill_text:
-        base_sys += f"\n\n## 技能参考\n{skill_text[:2000]}"
+    for t in pending:
+        f = t["file"]
+        path = Path(ws) / f
+        if not path.exists() or "sorry" not in path.read_text():
+            continue
 
-    futures = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        for t in pending:
-            f = t["file"]
-            path = Path(ws) / f
-            if not path.exists():
-                continue
-            if "sorry" not in path.read_text():
-                continue
+        line = t.get("line", "?")
+        goal = _extract_goal(ws, f, line)
+        goal_sig = goal.get("signature", "")
+        hint = hints.get(f, "")
+        fail_modes = failure_modes.get(f, [])
 
-            line = t.get("line", "?")
-            goal = _extract_goal(ws, f, line)
-            goal_sig = goal.get("signature", "")
-            hint = hints.get(f, "")
-            fail_modes = failure_modes.get(f, [])
+        cascade_ok, tactics_used = _try_tactics_cascade_all(ws, f)
+        if cascade_ok:
+            print(f"[prove] ✅ {f} 全部通过自动化策略: {tactics_used}")
+            state["completed"].append(f)
+            state["attempt_history"].append(_make_attempt(
+                f, line, loop_count, f"tactics_cascade:{','.join(tactics_used)}", "success"))
+            continue
 
-            # 构建文件级 sys_instructions（含失败模式调整）
-            sys_inst = base_sys
-            if "missing_infrastructure" in fail_modes:
-                sys_inst += "\n\n注意: 尝试 induction/recursion 基础方法，勿依赖可能不存在的引理。"
-            if "typeclass" in fail_modes:
-                sys_inst += "\n\n注意: 显式提供 haveI/letI 实例。"
-            if "wrong_construction" in fail_modes:
-                sys_inst += "\n\n注意: 重新检查类型签名。"
-            if "early_stopping" in fail_modes:
-                sys_inst += "\n\n注意: 分解为更小子目标。"
+        sys_prompt = "你是 Lean4 形式化证明助手。将文件中的 `sorry` 替换为正确且完整的 Lean 证明。"
+        if goal_sig:
+            sys_prompt += f"\n\n需要证明的目标:\n```lean\n{goal_sig}\n```"
+        if hint:
+            sys_prompt += f"\n\n非形式化证明指引:\n{hint}"
+        skill_text = _load_skills_deerflow() or _DEFAULT_SKILL
+        if skill_text:
+            sys_prompt += f"\n\n## Lean 技能参考\n{skill_text[:2000]}"
+        if "missing_infrastructure" in fail_modes:
+            sys_prompt += "\n\n注意: 尝试 induction/recursion 基础方法。"
+        if "typeclass" in fail_modes:
+            sys_prompt += "\n\n注意: 显式提供 haveI/letI 实例。"
+        if "wrong_construction" in fail_modes:
+            sys_prompt += "\n\n注意: 重新检查类型签名。"
+        if "early_stopping" in fail_modes:
+            sys_prompt += "\n\n注意: 分解为更小子目标。"
 
-            future = executor.submit(
-                _prove_single_file, ws, f, line, hint, fail_modes,
-                goal_sig, sys_inst, loop_count
-            )
-            futures.append((f, future))
+        agent = create_deerflow_agent(
+            model=create_chat_model(_get_model_name()),
+            tools=all_tools,
+            features=RuntimeFeatures(sandbox=True, loop_detection=True),
+            system_prompt=sys_prompt,
+            checkpointer=MemorySaver(),
+            name=f"prove-{Path(f).stem}",
+        )
+        try:
+            result = agent.invoke({"messages": [
+                HumanMessage(content=(f"请处理文件 {f}。\n\n"
+                    f"1. 用 read_file 读取内容\n"
+                    f"2. 用 lean_goal 获取目标状态\n"
+                    f"3. 用 lean_local_search 搜索引理\n"
+                    f"4. 用 write_file 填写证明代码\n"
+                    f"5. 用 lean_verify 编译验证\n"
+                    f"6. 如果失败，检查 lean_diagnostic_messages 并修复\n"
+                    f"7. 所有 sorry 通过编译后，输出文件内容")),
+            ]})
+            msgs = result.get("messages", [])
+            last = msgs[-1] if msgs else None
+            text = str(last.content) if last and hasattr(last, "content") else ""
+            if text and "sorry" not in text:
+                code = _extract(text)
+                if code:
+                    _write(ws, f, code)
+                print(f"[prove] ✅ {f} (DeerFlow agent)")
+                state["completed"].append(f)
+                state["attempt_history"].append(_make_attempt(
+                    f, line, loop_count, "deerflow_agent", "success"))
+            else:
+                print(f"[prove] ❌ {f} agent 未完成")
+                state["attempt_history"].append(_make_attempt(
+                    f, line, loop_count, "deerflow_agent", "abandoned"))
+        except Exception as e:
+            print(f"[prove] ❌ {f} agent 异常: {e}")
+            state["attempt_history"].append(_make_attempt(
+                f, line, loop_count, "deerflow_agent", "error",
+                lean_error=str(e)[:500], failure_mode="agent_error"))
+        del agent
 
-        # 收集结果
-        for f, future in futures:
-            try:
-                result = future.result(timeout=300)
-                state["attempt_history"].append(result)
-                if result.get("result") == "success" or result.get("result") == "no_sorries":
-                    state["completed"].append(f)
-                    print(f"[prove] ✅ {f}")
-                else:
-                    print(f"[prove] ❌ {f}: {result.get('failure_mode', 'unknown')}")
-            except Exception as e:
-                print(f"[prove] ❌ {f}: 并行执行异常: {e}")
-                state["attempt_history"].append({
-                    "file": f, "loop": loop_count,
-                    "strategy": "parallel", "result": "error",
-                    "lean_error": str(e)[:500], "failure_mode": "executor_error",
-                })
-
-    # 更新 pending
-    completed_set = set(state["completed"])
-    state["pending"] = [t for t in pending if t["file"] not in completed_set]
-
-    print(f"[prove] 本轮: {len(state['completed'])} 完成, {len(state['pending'])} 剩余")
+    done = {a["file"] for a in state["attempt_history"] if a.get("result") == "success"}
+    state["pending"] = [t for t in pending if t["file"] not in done]
+    print(f"[prove] 本轮: {len(done)} 完成, {len(state['pending'])} 剩余")
     return state
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# 节点：reviewer（增强）
-# ═══════════════════════════════════════════════════════════════════════
-
-
 def reviewer(state: ArchonState) -> ArchonState:
     """
     增强版 Reviewer：

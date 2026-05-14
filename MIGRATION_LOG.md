@@ -67,3 +67,20 @@
   - `route_archon` 改为 `reviewer → review_agent_node → planner` 或 `→ generator`(失败反馈) 或 `→ END`
   - 图结构加入 `review_agent_node` 节点，`add_edge("review_agent_node", "planner")`
 - **效果:** unified_prover 工作流也具备跨迭代的审查期刊能力
+
+### [Phase 1: 增量编译 + 结构化错误解析](#)
+- **文件:** `overlay/backend/workflows/archon_graph.py`, `overlay/backend/workflows/unified_graph.py`
+- **原状:** prover 每次修改 .lean 文件后都跑 `lake build`（全量项目编译，5-30s），错误信息以原始字符串截断传送
+- **改动:**
+  - **新增 `_verify_file(ws, f)`** — 用 `lake env lean <file>` 进行单文件增量验证（~1-2s），替代 `_build(ws)` 全量编译
+  - **新增 `_parse_lean_errors(stderr)`** — 将 Lean 编译器 stderr 解析为结构化记录：`{type, severity, file, line, col, message, raw}`
+  - **新增 `_classify_error(msg)`** — 将错误消息分类为 10 种类型：`type_mismatch`, `unknown_identifier`, `failed_to_synthesize`, `don_know_how`, `invalid`, `syntax_error`, `ambiguous`, `type_error`, `unsolved_goal`, `other`
+  - **新增 `_format_errors(errors)`** — 将结构化错误格式化为 LLM-readable 文本（最多 5 个错误 × 8 行消息）
+  - **prover/prover_node 重写：**
+    - `_build(ws) → _verify_file(ws, f)` 在主尝试和 fallback 尝试中
+    - 错误信息从截断原始字符串 `log[-2000:]` 改为结构化格式化 `_format_errors(verrors)`
+    - reasoner prompt 接收结构化错误（标注类型和位置），而非原始日志
+    - fallback attempt 同样携带结构化错误
+  - **reviewer/reviewer_node 保留 `_build(ws)`** 用于最终全量编译验证（只有此处用全量）
+- **原版对应:** 恢复原 Archon 三级验证阶梯中的第一级（per-file `lake env lean`）和第二级（结构化错误 → LLM 引导修复）
+- **效果:** 单文件验证从 5-30s 降至 ~1-2s，错误信息从原始字符串变为结构化格式

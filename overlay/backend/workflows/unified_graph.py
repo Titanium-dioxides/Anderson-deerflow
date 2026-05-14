@@ -188,6 +188,78 @@ def _write(ws: str, f: str, content: str) -> None:
     p.write_text(content)
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# Phase 1：增量编译 + 结构化错误解析（与 archon_graph.py 同步）
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def _classify_error(msg: str) -> str:
+    m = msg.lower()
+    if "type mismatch" in m:
+        return "type_mismatch"
+    if any(kw in m for kw in ["unknown identifier", "unknown constant", "unknown declaration",
+                               "unknown theorem", "unknown lemma", "unknown definition"]):
+        return "unknown_identifier"
+    if "failed to synthesize" in m:
+        return "failed_to_synthesize"
+    if "don't know how to" in m:
+        return "don_know_how"
+    if "invalid" in m:
+        return "invalid"
+    if any(kw in m for kw in ["expected", "unexpected"]):
+        return "syntax_error"
+    if "ambiguous" in m:
+        return "ambiguous"
+    if "is not a" in m or "has type" in m:
+        return "type_error"
+    return "other"
+
+
+def _parse_lean_errors(stderr: str) -> list[dict]:
+    errors = []
+    current = None
+    for line in stderr.split("\n"):
+        m = re.match(r'^(.+?):(\d+):(\d+):\s*(error|warning):\s*(.*)$', line)
+        if m:
+            if current:
+                errors.append(current)
+            current = {
+                "type": _classify_error(m.group(5)),
+                "severity": m.group(4),
+                "file": m.group(1),
+                "line": int(m.group(2)),
+                "col": int(m.group(3)),
+                "message": m.group(5).strip(),
+                "raw": line,
+            }
+        elif current:
+            current["message"] = current["message"].rstrip("\n") + "\n" + line
+    if current:
+        errors.append(current)
+    return errors
+
+
+def _verify_file(ws: str, f: str) -> tuple[bool, list[dict]]:
+    """Per-file incremental verification via `lake env lean` (~1-2s)."""
+    r = _bash(f"lake env lean {f} 2>&1", ws)
+    if r.returncode == 0:
+        return (True, [])
+    return (False, _parse_lean_errors(r.stderr if r.stderr else r.stdout))
+
+
+def _format_errors(errors: list[dict], max_lines: int = 40) -> str:
+    lines = []
+    for e in errors[:5]:
+        lines.append(f"{e['type']} at {e['file']}:{e['line']}:{e['col']}")
+        for l in e['message'].split("\n")[:8]:
+            lines.append(f"  {l}")
+        lines.append("")
+    combined = "\n".join(lines)
+    if len(combined) > max_lines * 80:
+        combined = combined[:max_lines * 80] + "\n... (truncated)"
+    return combined
+
+
 def _search(query: str) -> list[dict]:
     import urllib.request, ssl
     try:
@@ -501,13 +573,14 @@ def prover_node(state: UnifiedState) -> UnifiedState:
             HumanMessage(content=f"文件 {f}:\n```lean\n{file_content}\n```"),
         ])
         code = _extract_code(str(resp.content))
+        result_status = ""
         lean_error = ""
 
         if code and "sorry" not in code:
             _write(ws, f, code)
-            ok, build_log = _build(ws)
+            ok, verrors = _verify_file(ws, f)
             if ok:
-                print(f"[archon] ✅ {f}")
+                print(f"[archon] ✅ {f} (per-file lean)")
                 done.append(f)
                 state["attempt_history"].append({
                     "file": f, "line": line, "loop": state["loop_count"],
@@ -516,18 +589,20 @@ def prover_node(state: UnifiedState) -> UnifiedState:
                 })
                 continue
             else:
-                lean_error = build_log[-2000:]
-                print(f"[archon] ⚠ {f} build failed")
+                result_status = "build_failed"
+                lean_error = _format_errors(verrors)
+                print(f"[archon] ⚠ {f} per-file lean failed ({len(verrors)} error(s))")
         else:
+            result_status = "no_valid_code"
             lean_error = "LLM did not return valid Lean code"
 
-        # ── 卡住 → 推理模型 fallback ──
+        # ── 卡住 → 推理模型 fallback（结构化错误） ──
         print(f"[archon] ⚠ {f} stuck, calling reasoner...")
         reasoner_prompt = f"Prove in Lean:\n{_read(ws, f)}"
-        if lean_error and len(lean_error) > 10:
-            reasoner_prompt += f"\n\nErrors:\n{lean_error[:2000]}"
+        if lean_error:
+            reasoner_prompt += f"\n\n## Lean Errors (structured)\n{lean_error}"
         if hint:
-            reasoner_prompt += f"\n\nHint:\n{hint}"
+            reasoner_prompt += f"\n\n## Hint\n{hint}"
 
         hint_resp = _model(think=True).invoke([
             SystemMessage(content="Provide an informal proof sketch."),
@@ -537,6 +612,8 @@ def prover_node(state: UnifiedState) -> UnifiedState:
         fallback_msg = "Use the hint to fill the sorry with correct Lean code."
         if fail_modes:
             fallback_msg += f" Avoid previous failures: {', '.join(fail_modes)}."
+        if lean_error and result_status == "build_failed":
+            fallback_msg += f"\n\nPrevious Lean errors:\n{lean_error}"
 
         resp2 = _model().invoke([
             SystemMessage(content=fallback_msg),
@@ -547,9 +624,9 @@ def prover_node(state: UnifiedState) -> UnifiedState:
         result_status = "abandoned"
         if code2 and "sorry" not in code2:
             _write(ws, f, code2)
-            ok, log2 = _build(ws)
+            ok, verrors2 = _verify_file(ws, f)
             if ok:
-                print(f"[archon] ✅ {f} (retry)")
+                print(f"[archon] ✅ {f} (retry, per-file lean)")
                 done.append(f)
                 state["attempt_history"].append({
                     "file": f, "line": line, "loop": state["loop_count"],
@@ -559,7 +636,7 @@ def prover_node(state: UnifiedState) -> UnifiedState:
                 continue
             else:
                 result_status = "build_failed"
-                lean_error = log2[-2000:]
+                lean_error = _format_errors(verrors2)
         else:
             result_status = "abandoned"
 

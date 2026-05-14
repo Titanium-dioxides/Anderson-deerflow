@@ -119,6 +119,11 @@ class UnifiedState(dict):
     previous_strategies: dict[str, list]  # {file: ["策略已尝试列表"]}
 
 
+def _read_saved_hints(ws: str) -> str:
+    hints_path = Path(ws) / ".archon-journal" / "USER_HINTS.md"
+    return hints_path.read_text() if hints_path.exists() else ""
+
+
 def fresh_state(statement: str, ws: str = "", max_loops: int = 5) -> UnifiedState:
     return UnifiedState(
         messages=[],
@@ -191,6 +196,17 @@ def _model(name=None, think=False):
     return create_chat_model(name, thinking_enabled=think)
 
 
+def _make_attempt(file: str, line: str, loop: int, strategy: str, result: str,
+                  lean_error: str = "", failure_mode: str = "", **kw) -> dict:
+    return {
+        "file": file, "line": line, "loop": loop,
+        "strategy": strategy, "result": result,
+        "lean_error": lean_error, "failure_mode": failure_mode,
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        **kw,
+    }
+
+
 def _read_prompt(path: str) -> str:
     p = Path(path)
     return p.read_text() if p.exists() else ""
@@ -217,12 +233,17 @@ def _extract_code(text: str) -> str:
 
 
 def _scan(ws: str) -> list[dict]:
-    r = _bash("grep -rn 'sorry' --include='*.lean' . | grep -v '.lake/'", ws)
+    """Y5: 扫描 sorry，排除注释。"""
+    r = _bash(
+        "grep -rn 'sorry' --include='*.lean' . "
+        "| grep -v '.lake/' "
+        "| grep -v '\\s*--' "
+        "| head -200", ws)
     items = []
     for line in r.stdout.strip().split("\n"):
         parts = line.split(":", 2)
         if len(parts) >= 2:
-            items.append({"file": parts[0], "line": parts[1]})
+            items.append({"file": parts[0], "line": parts[1], "context": line})
     return items
 
 

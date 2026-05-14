@@ -185,6 +185,18 @@ def _model(name=None, think=False):
     return create_chat_model(name, thinking_enabled=think)
 
 
+def _make_attempt(file: str, line: str, loop: int, strategy: str, result: str,
+                  lean_error: str = "", failure_mode: str = "", **kw) -> dict:
+    """Item 7: 创建 attempt 记录，自动添加时间戳。"""
+    return {
+        "file": file, "line": line, "loop": loop,
+        "strategy": strategy, "result": result,
+        "lean_error": lean_error, "failure_mode": failure_mode,
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        **kw,
+    }
+
+
 def _extract(text: str) -> str:
     m = re.search(r'```(?:lean)?\s*\n?(.*?)```', text, re.DOTALL)
     return m.group(1).strip() if m else text.strip()

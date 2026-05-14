@@ -57,14 +57,19 @@
 - **影响:** 无 checkpoint、无消息持久化
 - **估计:** 2h
 
-### Y5. 文件扫描用 grep 而非 LSP
-- **描述:** `_scan()` 用 `grep -rn sorry` 扫描 .lean 文件，未使用 `lean_file_outline` LSP 工具
-- **影响:** 无法区分声明级 sorry 和注释中的 sorry 文本
-- **方案:** LSP tool `lean_file_outline` + `lean_diagnostic_messages`
-- **估计:** 1h
+### ~~Y6. 错误处理~~ ✅ 2026-05-14
+- `_safe_invoke()` 含 retries 参数
 
-### Y6. 错误处理用 try/except + print
-- **描述:** 无 middleware 统一错误处理，`_bash()` 内部 timeout=300 硬编码
+### Y4. 无 ThreadState 集成
+- **描述:** `ArchonState(dict)` 自定义状态，未使用 `ThreadState(AgentState)`
+- **影响:** 无 checkpoint、无消息持久化
+- **估计:** 2h
+
+### Y1. 手动 StateGraph 而非 create_agent()
+- **描述:** 使用手动构建的 `StateGraph(ArchonState)` + 4 个自定义节点，而非 DeerFlow 标准的 `create_agent()` + middleware chain
+- **影响:** 无法利用 middleware（sandbox、memory、checkpoint 等）
+- **权衡:** 通用 agent 模式不适合数学定理证明的结构化工作流（plan→prove→review 循环）。手动 StateGraph 是合理的 tradeoff，但需要自行补齐 sandbox/middleware
+- **估计:** 4h（如需迁移）
 - **估计:** 1h
 
 ---

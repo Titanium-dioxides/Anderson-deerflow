@@ -277,6 +277,82 @@ def _extract_goal(ws: str, f: str, line_str: str) -> dict:
     }
 
 
+def _local_lean_search(query: str, ws: str, max_results: int = 15) -> list[dict]:
+    """Local search for Lean declarations matching query.
+
+    原版对应：lean_local_search() — 使用 ripgrep 的快速本地搜索。
+    移植版用 grep 降级，搜索项目文件 + mathlib 子目录 + Lean stdlib。
+    返回: [{name, kind, file}, ...] 按相关性排序。
+    """
+    # 声明匹配模式（与原版 lean_local_search 相同）
+    decl_kinds = r"theorem|lemma|def|axiom|class|instance|structure|inductive|abbrev|opaque"
+    pattern = (
+        rf"^\s*(?:{decl_kinds})\s+"
+        rf"(?:[A-Za-z0-9_\'.]+\.)*{re.escape(query)}[A-Za-z0-9_\'.]*(?:\s|:)"
+    )
+
+    matches: list[dict] = []
+
+    def _grep_search(grep_dir: str, label: str) -> None:
+        nonlocal matches
+        remaining = max_results * 6 - len(matches)
+        if remaining <= 0:
+            return
+        r = _bash(
+            f"grep -rnHP '{pattern}' --include='*.lean' . | head -{remaining}",
+            grep_dir,
+        )
+        for line in r.stdout.strip().split("\n"):
+            parts = line.split(":", 2)
+            if len(parts) >= 2:
+                text = parts[2] if len(parts) > 2 else ""
+                m = re.match(rf"^\s*(\w+)\s+([A-Za-z0-9_.\']+)", text)
+                if m:
+                    matches.append({"name": m.group(2), "kind": m.group(1), "file": f"{label}:{parts[0]}"})
+
+    # 1. 搜索项目文件（排除 .lake）
+    _grep_search(ws, "project")
+
+    # 2. 搜索 mathlib 特定子目录（不全搜，只搜主要目录）
+    for subdir in ["Algebra", "Analysis", "Data", "Logic", "SetTheory", "Topology", "NumberTheory"]:
+        tp = Path(ws) / ".lake/packages/mathlib/Mathlib" / subdir
+        if tp.exists():
+            _grep_search(str(tp), f"mathlib/{subdir}")
+
+    # 3. 搜索 Lean stdlib
+    lean_prefix = _bash("lean --print-prefix 2>/dev/null", ws).stdout.strip()
+    if lean_prefix:
+        stdlib_path = Path(lean_prefix) / "src"
+        if stdlib_path.exists():
+            _grep_search(str(stdlib_path), "stdlib")
+
+    # 去重 + 按相关性排序（与原版 _local_search_sort_key 一致）
+    seen: set[str] = set()
+    scored: list[tuple[int, int, dict]] = []
+    query_lower = query.lower()
+    for m in matches:
+        key = f"{m['name']}|{m['kind']}"
+        if key in seen:
+            continue
+        seen.add(key)
+        name_lower = m["name"].lower()
+        # 精确匹配 > 前缀匹配 > 包含匹配
+        if name_lower == query_lower:
+            relevance = 0
+        elif name_lower.startswith(query_lower):
+            relevance = 1
+        elif query_lower in name_lower:
+            relevance = 2
+        else:
+            relevance = 3
+        # 项目文件优先于 mathlib 依赖
+        priority = 0 if m["file"].startswith("project") else 1
+        scored.append((relevance, priority, m))
+
+    scored.sort(key=lambda x: (x[0], x[1], x[2]["name"]))
+    return [m for _, _, m in scored[:max_results]]
+
+
 def _search_mathlib(query: str, max_results: int = 5) -> list[dict]:
     """Search mathlib for theorems related to the query via leansearch.net."""
     try:
@@ -431,16 +507,20 @@ def planner(state: ArchonState) -> ArchonState:
         if g.get("signature"):
             goals.append({"file": s["file"], "line": s["line"], "signature": g["signature"]})
     
-    # ── 4. 搜索 mathlib（用第一个 sorry 的上下文作为查询词） ──
+    # ── 4. 搜索 mathlib（远程 + 本地） ──
     search_results = []
     if sorries:
         first_goal = goals[0]["signature"][:100] if goals else sorries[0]["context"][:100]
-        raw_results = _search_mathlib(first_goal, max_results=3)
-        if raw_results:
-            for r in raw_results[:3]:
-                thm = r.get("theorem", "") or r.get("title", "")
-                if thm and len(thm) < 500:
-                    search_results.append(f"- {thm}")
+        # 远程搜索
+        remote = _search_mathlib(first_goal, max_results=3)
+        for r in remote[:3]:
+            thm = r.get("theorem", "") or r.get("title", "")
+            if thm and len(thm) < 500:
+                search_results.append(f"- {thm} (remote)")
+        # 本地搜索
+        local = _local_lean_search(first_goal.split(":", 1)[0] if ":" in first_goal else first_goal, ws, max_results=5)
+        for r in local[:5]:
+            search_results.append(f"- {r['kind']} {r['name']} ({r['file']})")
     
     # ── 5. 让模型生成指引 ──
     prompt_parts = [

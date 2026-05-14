@@ -96,3 +96,14 @@
   - **`unified_graph.py` 修复 `_search()`** — resp.read() 调用顺序修复（先 read 再 decode）
 - **原版对应:** 恢复原 Archon 的 `lean_goal(file, line)` 获取精确目标的能力（通过文件扫描模拟），以及 `lean_leansearch()` / `lean_local_search()` 的搜索能力（通过 leansearch.net API 模拟）
 - **效果:** LLM 不再猜测目标类型，每次证明请求都包含精确定理签名；planner 可获得 mathlib 中已知相关定理作为参考
+
+### [_local_lean_search — 实现本地声明搜索](#)
+- **文件:** `overlay/backend/workflows/archon_graph.py`, `overlay/backend/workflows/unified_graph.py`
+- **原状:** 只实现了 `_search_mathlib()` 远程 leansearch.net API，无本地搜索
+- **改动:**
+  - **新增 `_local_lean_search(query, ws, max_results)`** — 搜索 Lean 声明匹配查询字符串
+  - **搜索范围：** （1）项目 .lean 文件（排除 .lake）→ （2）mathlib 主要子目录（Algebra/Analysis/Data/Logic/SetTheory/Topology/NumberTheory） → （3）Lean stdlib（通过 `lean --print-prefix` 定位）
+  - **排序：** 精确匹配 > 前缀匹配 > 包含匹配；项目文件 > mathlib 依赖（与原版 `_local_search_sort_key` 逻辑一致）
+  - **原版对应：** 恢复原 Archon `lean_local_search()` 的核心语义
+  - **集成：** planner 同时做远程搜索 + 本地搜索，结果合并注入提示词
+- **性能说明：** 原版使用 ripgrep（rg）高速搜索，移植版用 `grep -rnHP` 降级。rg 安装后可自动提速

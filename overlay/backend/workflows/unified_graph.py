@@ -261,8 +261,65 @@ def _format_errors(errors: list[dict], max_lines: int = 40) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Phase 2：目标提取（同步 archon_graph.py）
+# Phase 2：目标提取 + 本地搜索（同步 archon_graph.py）
 # ═══════════════════════════════════════════════════════════════════════
+
+
+def _local_lean_search(query: str, ws: str, max_results: int = 15) -> list[dict]:
+    """Local search for Lean declarations matching query.
+
+    原版对应：lean_local_search() — ripgrep 本地搜索。
+    移植版用 grep 降级。搜索：项目文件 + mathlib 主要子目录 + Lean stdlib。
+    """
+    decl_kinds = r"theorem|lemma|def|axiom|class|instance|structure|inductive|abbrev|opaque"
+    pattern = (
+        rf"^\s*(?:{decl_kinds})\s+"
+        rf"(?:[A-Za-z0-9_\'.]+\.)*{re.escape(query)}[A-Za-z0-9_\'.]*(?:\s|:)"
+    )
+    matches: list[dict] = []
+
+    def _grep(grep_dir: str, label: str) -> None:
+        nonlocal matches
+        remaining = max_results * 6 - len(matches)
+        if remaining <= 0:
+            return
+        r = _bash(
+            f"grep -rnHP '{pattern}' --include='*.lean' . | head -{remaining}",
+            grep_dir,
+        )
+        for line in r.stdout.strip().split("\n"):
+            parts = line.split(":", 2)
+            if len(parts) >= 2:
+                text = parts[2] if len(parts) > 2 else ""
+                m = re.match(rf"^\s*(\w+)\s+([A-Za-z0-9_.\']+)", text)
+                if m:
+                    matches.append({"name": m.group(2), "kind": m.group(1), "file": f"{label}:{parts[0]}"})
+
+    _grep(ws, "project")
+    for subdir in ["Algebra", "Analysis", "Data", "Logic", "SetTheory", "Topology", "NumberTheory"]:
+        tp = Path(ws) / ".lake/packages/mathlib/Mathlib" / subdir
+        if tp.exists():
+            _grep(str(tp), f"mathlib/{subdir}")
+    lean_prefix = _bash("lean --print-prefix 2>/dev/null", ws).stdout.strip()
+    if lean_prefix:
+        stdlib = Path(lean_prefix) / "src"
+        if stdlib.exists():
+            _grep(str(stdlib), "stdlib")
+
+    seen: set[str] = set()
+    scored: list[tuple[int, int, dict]] = []
+    q = query.lower()
+    for m in matches:
+        key = f"{m['name']}|{m['kind']}"
+        if key in seen:
+            continue
+        seen.add(key)
+        nl = m["name"].lower()
+        relevance = 0 if nl == q else (1 if nl.startswith(q) else (2 if q in nl else 3))
+        priority = 0 if m["file"].startswith("project") else 1
+        scored.append((relevance, priority, m))
+    scored.sort(key=lambda x: (x[0], x[1], x[2]["name"]))
+    return [m for _, _, m in scored[:max_results]]
 
 
 def _extract_goal(ws: str, f: str, line_str: str) -> dict:
@@ -520,16 +577,20 @@ def planner_node(state: UnifiedState) -> UnifiedState:
         if g.get("signature"):
             goals.append({"file": s["file"], "line": s["line"], "signature": g["signature"]})
 
-    # ── 搜索 mathlib ──
+    # ── 搜索 mathlib（远程 + 本地） ──
     search_results = []
     if sorries and goals:
         query = goals[0]["signature"][:100]
-        raw_results = _search(query)
-        if raw_results:
-            for r in raw_results[:3]:
-                thm = r.get("theorem", "") or r.get("title", "")
-                if thm and len(thm) < 500:
-                    search_results.append(f"- {thm}")
+        # 远程
+        remote = _search(query)
+        for r in remote[:3]:
+            thm = r.get("theorem", "") or r.get("title", "")
+            if thm and len(thm) < 500:
+                search_results.append(f"- {thm} (remote)")
+        # 本地
+        local = _local_lean_search(goals[0]["signature"].split(":", 1)[0] if ":" in goals[0]["signature"] else goals[0]["signature"], ws, 5)
+        for r in local[:5]:
+            search_results.append(f"- {r['kind']} {r['name']} ({r['file']})")
 
     # ── 让模型生成解析和指引 ──
     prompt = (

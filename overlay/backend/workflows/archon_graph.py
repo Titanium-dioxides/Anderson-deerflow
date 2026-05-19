@@ -15,6 +15,7 @@ from typing import Annotated, Literal, TypedDict
 
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
+from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from deerflow.subagents import SubagentConfig, SubagentExecutor
@@ -774,7 +775,7 @@ def build_archon_graph():
     w.add_conditional_edges("reviewer", route, {"review_agent": "review_agent", "polish": "polish"})
     w.add_edge("polish", "review_agent")
     w.add_conditional_edges("review_agent", route_after_review, {"planner": "planner", END: END})
-    return w.compile()
+    return w.compile(checkpointer=MemorySaver())
 
 
 def run_archon_workflow(ws: str, max_loops: int = 5) -> dict:

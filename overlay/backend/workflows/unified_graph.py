@@ -15,6 +15,7 @@ from typing import Annotated, Literal, TypedDict
 
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
+from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from deerflow.config.app_config import get_app_config
@@ -1006,7 +1007,7 @@ def build_unified_graph():
     })
     w.add_edge("polish", "review_agent_node")
     w.add_edge("review_agent_node", "planner")
-    return w.compile()
+    return w.compile(checkpointer=MemorySaver())
 
 
 def run_unified_workflow(statement: str, workspace_path: str = "", max_loops: int = 5) -> dict:

@@ -11,8 +11,8 @@
 | B2 exact?/apply? 策略 | 🚧 外部依赖 | ⚡ 自动解除 | ✅ B1 解除后自动可用 |
 | B3 无集成测试环境 | 🚧 无环境 | 🚧 无环境 | 🔴 需要 deer-flow 容器运行时 |
 | B4 并行 Prover |   Architecture | ⚡ 架构可解决 | ✅ SubagentExecutor 并行 spawn |
-| B5 子目标分解 | ⏳ 未实现 | ⏳ 未实现 | 🔴 纯 LLM 任务，未做 |
-| B6 Review Agent 代码变更 | ⏳ 未实现 | ⏳ 未实现 | 🔴 需引入文件快照 diff |
+| B5 子目标分解 | ⏳ 未实现 | ⏳ 未实现 | ✅ 2026-05-19 planner 自动分解 |
+| B6 Review Agent 代码变更 | ⏳ 未实现 | ⏳ 未实现 | ✅ 2026-05-19 _file_snapshots + _compute_diff |
 | A1-A3 规范问题 | — | — | ✅ 2026-05-19 全部修复 |
 | D1-D3 Subagent 问题 | — | — | ✅ 2026-05-19 全部修复 |
 | E1-E6 代码质量 | — | — | ✅ 2026-05-19 全部修复 |
@@ -157,7 +157,11 @@ planner → [prover_A → reviewer]  # 扇出两个 graph 分支
 
 ---
 
-### ⏳ B5: 子目标分解（未实现）
+### ✅ B5: 子目标分解（已解决 2026-05-19）
+
+planner 节点现在会检测多次失败的复杂定理，调用 LLM 分解为 2-4 个辅助引理并写入文件。
+
+---
 
 **为什么没做：** 时间/优先级。Planner 已经做了失败模式识别 + 目标提取 + 搜索，子目标分解是纯 LLM 任务在 planner prompt 中扩展。
 
@@ -174,7 +178,11 @@ theorem main : ... := by
 
 ---
 
-### ⏳ B6: Review Agent 缺少代码变更（未实现）
+### ✅ B6: Review Agent 缺少代码变更（已解决 2026-05-19）
+
+`_file_snapshots` 字典缓存文件修改前内容，`_compute_diff()` 生成行级 diff 报告。
+
+---
 
 **为什么没做：** 需要引入每个 attempt 前后的文件快照比对。改动量约 20 行：
 

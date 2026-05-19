@@ -39,6 +39,20 @@ from .shared import (  # E1: 从共享模块导入
 
 logger = logging.getLogger(__name__)
 
+# B6: 文件快照缓存
+_file_snapshots: dict[str, str] = {}
+
+def _snapshot_key(f: str) -> str:
+    return f"snapshot-{f}"
+
+def _compute_diff(before: str, after: str) -> str:
+    b_lines = before.split('\n')
+    a_lines = after.split('\n')
+    added = max(0, len(a_lines) - len(b_lines))
+    removed = max(0, len(b_lines) - len(a_lines))
+    changed = 1 if (before != after and before.strip() and after.strip()) else 0
+    return f"+{added} lines, -{removed} lines, changed={changed}"
+
 
 # ── 路径 ──────────────────────────────────────────────────────────────
 
@@ -399,6 +413,46 @@ def planner_node(state: UnifiedState) -> UnifiedState:
     # P1: LLM 驱动规划
     needs_llm = bool(user_hints) or bool(all_attempts)
     if needs_llm:
+        # B5: 检测需要分解的复杂定理
+        for s in sorries:
+            fn = s["file"]
+            file_attempts = [a for a in all_attempts if a["file"] == fn]
+            if len(file_attempts) < 2:
+                continue
+            if all(a.get("result") in ("abandoned", "error", "timed_out") for a in file_attempts):
+                file_path = Path(ws, fn)
+                if not file_path.exists():
+                    continue
+                content_lines = file_path.read_text().split("\n")
+                target_line = int(s["line"]) if s["line"].isdigit() else 0
+                gs = extract_goal(content_lines, target_line).get("signature", "")
+                if len(gs) < 50:
+                    continue
+                decomp_prompt = (
+                    f"你是一个 Lean4 形式化专家。以下定理多次证明失败：\n\n"
+                    f"```lean\n{gs[:800]}\n```\n\n"
+                    f"失败模式: {', '.join(failure_modes.get(fn, ['unknown']))}\n"
+                    f"已尝试: {', '.join(previous_strategies.get(fn, ['?']))}\n\n"
+                    f"请将这个定理分解为 2-4 个辅助引理。"
+                    f"输出 Lean 代码，每个辅助引理用 `:= by\n  sorry` 占位。"
+                )
+                try:
+                    resp = make_model().invoke([
+                        SystemMessage(content="你是 Lean4 形式化专家。将复杂定理分解为子引理。"),
+                        HumanMessage(content=decomp_prompt),
+                    ])
+                    sub_lemmas = extract_code(str(resp.content))
+                    if sub_lemmas and len(sub_lemmas) > 100:
+                        insert_pos = max(0, target_line - 1)
+                        all_l = (content_lines[:insert_pos]
+                            + ["", "/- B5: 子目标分解 (自动生成) -/", ""]
+                            + sub_lemmas.split("\n") + [""]
+                            + content_lines[insert_pos:])
+                        file_path.write_text("\n".join(all_l))
+                        logger.info("[plan-node] B5: %s 已分解 (%d 行)", fn, len(sub_lemmas.split("\n")))
+                except Exception as e:
+                    logger.warning("[plan-node] B5: %s 分解失败: %s", fn, e)
+
         plan_lines = [
             "你是 Archon Plan Agent。分析当前证明状态并生成非形式化指引。",
             "",
@@ -499,6 +553,8 @@ def _spawn_prove_subagent(executor: SubagentExecutor, t: dict, state: UnifiedSta
         if cascade_ok:
             logger.info("[prove-node] %s 自动化策略: %s", f, tactics_used)
             return None
+        # B6: 文件快照
+        _file_snapshots[_snapshot_key(f)] = content
         goal_sig = extract_goal(
             content.split("\n"),
             int(line) if line.isdigit() else 0,

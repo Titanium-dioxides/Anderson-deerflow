@@ -1,5 +1,32 @@
 # MIGRATION_LOG.md — Archon + Rethlas → DeerFlow 移植记录
 
+## 2026-05-19
+
+### [audit-subagent] SubagentExecutor 替代 create_deerflow_agent
+- **文件:** `overlay/backend/workflows/archon_graph.py`, `overlay/backend/workflows/unified_graph.py`
+- **D1 修复:** prover 节点不再使用 `create_deerflow_agent().invoke()` 串行处理文件，改为 `SubagentExecutor` + `execute_async()` 每文件 spawn subagent
+- **D2 修复:** `get_available_tools(subagent_enabled=True)` 启用 task 工具
+- **D3 修复:** subagent 通过 SandboxMiddleware 自管理 sandbox，不独立 acquire/release
+- **新增模块级 SubagentConfig:** `PROVER_SUBAGENT_CONFIG` / `UNIFIED_PROVER_CONFIG`
+- **导入精简:** 移除 `create_deerflow_agent`, `RuntimeFeatures`, `MemorySaver`, `concurrent.futures`
+- **新增函数:** `_spawn_prove_subagent()`, `_collect_subagent_result()` / `_collect_prove_result()`
+- **测试:** 语法 + 共享模块全通过
+- **文件:** `SUBAGENT_AUDIT.md` — 独立审计报告
+- **文件:** `IMPLEMENTATION_AUDIT.md` (新建)
+- **基准:** DeerFlow `backend/packages/harness/deerflow/` 源码
+- **关键发现:**
+  - 🔴 A1: `ArchonState(dict)` / `UnifiedState(dict)` 未继承 `ThreadState(AgentState)`，导致 checkpoint 失效、sandbox 中间件无法管理生命周期
+  - 🔴 A2: `_bash()`/`_read()`/`_write()` 绕过 SandboxMiddleware 直接 `get_sandbox_provider()`，路径安全校验缺失、resource acquire 重复、ID 硬编码
+  - 🔴 A3: `create_deerflow_agent()` 在 for 循环内反复构建+销毁，MCP 工具每次重载、checkpoint 不共享、sandbox 泄漏
+  - 🔴 A4: `_verify_file()` 仍在手动 `_bash("lake env lean")`
+  - 🟡 B1-B5: 手动 skills 加载、~800 行重复代码、grep 替代 LSP 扫描、手动 tool-calling loop
+  - 🟢 C1-C5: 小优化项
+- **修复优先级:** A1 > A2 > A3 > A4(A2 自动解) > B2(代码抽取) > 其余
+- **新增文件:** `IMPLEMENTATION_AUDIT.md` — 完整审计报告，含每项问题的规范代码对比
+- **TODO 更新:** 添加 14 项新 TODO（A1-C5）
+
+
+
 > 📋 **本项目开发准则：**
 > 1. **每次代码修改必须记录在 `MIGRATION_LOG.md`** — 格式: `YYYY-MM-DD: [组件] 改动说明`
 > 2. **每次修改代码后必须执行冒烟测试** — 规则见 `SMOKE_TEST.md`
@@ -8,6 +35,7 @@
 > 5. **维护 `TODO.md`** — 未完成功能、已知问题、待改进项，按优先级排列。每次发现新问题必须更新
 > 6. **维护 `BLOCKERS.md`** — 区分受阻问题（外部依赖/架构限制）与未实现功能。每次解除 blocker 必须记录
 > 7. **维护 `KNOWLEDGE.md`** — 记录项目知识
+> 8. **维护 `IMPLEMENTATION_AUDIT.md`** — 详细实现审计报告
 
 ---
 

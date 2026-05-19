@@ -1,235 +1,117 @@
 """
 Unified Math Prover — Rethlas 非形式化证明 → Archon(Lean) 验证
 ================================================================
-完整保留两端原始 Agent 工作流：
-
-  Rethlas: generate → verify(JSON) → repair(≤3)
-  Archon:  planner → prover → reviewer
-
-  用户命题
-      │
-      ▼
-  ┌─ Rethlas Generate ────────┐
-  │  (prompts/generator.md)    │
-  └─────────┬──────────────────┘
-            │ <proof>...
-            ▼
-  ┌─ Rethlas Verify ──────────┐
-  │  (prompts/verifier.md)    │  JSON self-check
-  │  verdict=="wrong" → fix   │  ≤3 rounds
-  └─────────┬──────────────────┘
-            │ correct
-            ▼
-  ┌─ Archon Planner ──────────┐
-  │  扫描 sorry, 排优先级     │
-  └─────────┬──────────────────┘
-            │
-            ▼
-  ┌─ Archon Prover ───────────┐
-  │  以 Rethlas proof 为指引  │
-  │  填充 Lean 代码           │
-  └─────────┬──────────────────┘
-            │
-            ▼
-  ┌─ Archon Reviewer ─────────┐
-  │  lake build 验证          │
-  │                            │
-  ├── PASS → COMPLETE ✅      │
-  │                            │
-  └── FAIL → Rethlas(Lean err)┘
-              ▲ (Rethlas 阅读理解 Lean 错误, 修复证明)
-              │
-              └── 重新生成 ───┘
+Rethlas: generate → verify → repair(≤3) → Archon: planner → prover → reviewer
 """
 
-import concurrent.futures
 import datetime
 import json
+import logging
 import os
 import re
-import subprocess
+import time
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Literal, TypedDict
 
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
-from langgraph.checkpoint.memory import MemorySaver
+from langchain_core.messages import HumanMessage, SystemMessage
 
-from deerflow.agents.factory import create_deerflow_agent
-from deerflow.agents.features import RuntimeFeatures
 from deerflow.config.app_config import get_app_config
-from deerflow.models import create_chat_model
-from deerflow.mcp.cache import get_cached_mcp_tools
+from deerflow.subagents import SubagentConfig, SubagentExecutor
+from deerflow.subagents.executor import (
+    SubagentStatus,
+    get_background_task_result,
+    cleanup_background_task,
+)
 
-_PATHS: dict[str, Path] = {}
+from .shared import (  # E1: 从共享模块导入
+    classify_error, parse_lean_errors, format_errors,
+    extract_goal, classify_failure,
+    make_attempt, extract_code, extract_json,
+    AUTO_TACTICS,
+    sandbox_context, exec_with_sandbox,
+    read_with_sandbox, write_with_sandbox,
+    scan_sorries, count_sorries, build_project, verify_file,
+    try_tactics_cascade, try_tactics_cascade_all,
+    get_model_name, make_model,
+)
+
+logger = logging.getLogger(__name__)
 
 
-def _resolve_path(name: str, default: Path) -> Path:
-    """G3: 可配置路径。"""
-    if name not in _PATHS:
-        env_val = os.environ.get(f"ARCHON_{name.upper()}_PATH")
-        _PATHS[name] = Path(env_val) if env_val else default
-    return _PATHS[name]
+# ── 路径 ──────────────────────────────────────────────────────────────
 
-
-try:
-    from deerflow.sandbox.sandbox_provider import get_sandbox_provider
-    _SANDBOX_AVAILABLE = True
-except Exception:
-    _SANDBOX_AVAILABLE = False
-
-
-# ── 路径常量 ──────────────────────────────────────────────────────────
 _PROJECT_DIR = Path(__file__).parent.parent.parent
 _RETHLAS_DIR = _PROJECT_DIR / "skills" / "custom" / "math-prover"
 _GEN_PROMPT = str(_RETHLAS_DIR / "prompts" / "generator.md")
 _VER_PROMPT = str(_RETHLAS_DIR / "prompts" / "verifier.md")
 _SEARCH_URL = "https://leansearch.net/thm/search"
 
-# ── 状态 ──────────────────────────────────────────────────────────────
+
+# ── A1/E6: 状态 ────────────────────────────────────────────────────────
 
 
-class UnifiedState(dict):
+def _merge_attempts(existing: list | None, new: list | None) -> list:
+    return (existing or []) + (new or [])
+
+
+def _merge_failure_modes(existing: dict | None, new: dict | None) -> dict:
+    merged = dict(existing or {})
+    for k, v in (new or {}).items():
+        merged[k] = merged.get(k, []) + v
+    return merged
+
+
+class UnifiedState(TypedDict):
     messages: Annotated[list, add_messages]
-
-    # 命题
-    statement: str                    # 用户输入的数学命题
-
-    # Rethlas 阶段 (保留原 Rethlas Agent 工作流)
-    informal_proof: str               # 生成的 <proof>...
-    rethlas_attempts: int             # 生成→验证轮数
-    rethlas_history: list             # 修复历史 [{attempt, verdict, ...}]
-    rethlas_failed: bool              # 3 轮均未通过
-
-    # Archon 阶段 (保留原 Archon Agent 工作流)
+    statement: str
+    thread_id: str
+    informal_proof: str
+    rethlas_attempts: int
+    rethlas_history: list
+    rethlas_failed: bool
     workspace_path: str
-    stage: Literal["AUTOFORMALIZE", "PROVER", "POLISH", "COMPLETE"]
+    stage: Literal["AUTOFORMALIZE", "PROVER", "POLISH", "COMPLETE", "RETHLAS"]
     pending: list
     completed: list
     loop_count: int
     max_loops: int
     review: str
-
-    # 跨层反馈
-    archon_feedback: str              # Lean 编译错误 → 送回 Rethlas
-    archon_outer_cycles: int           # Rethlas→Archon 外层尝试次数
-
-    # 增强 Archon Plan Agent 字段
-    attempt_history: list[dict]        # [{file, line, strategy, result, lean_error, failure_mode, loop}, ...]
-    failure_modes: dict[str, list]    # {file: [failure_mode, ...]}
-    informal_hints: dict[str, str]    # {file: "非形式化证明指引"}
-    previous_strategies: dict[str, list]  # {file: ["策略已尝试列表"]}
-
-
-def _read_saved_hints(ws: str) -> str:
-    hints_path = Path(ws) / ".archon-journal" / "USER_HINTS.md"
-    return hints_path.read_text() if hints_path.exists() else ""
+    archon_feedback: str
+    archon_outer_cycles: int
+    attempt_history: Annotated[list, _merge_attempts]
+    failure_modes: Annotated[dict, _merge_failure_modes]
+    informal_hints: dict[str, str]
+    previous_strategies: dict[str, list]
 
 
 def fresh_state(statement: str, ws: str = "", max_loops: int = 5) -> UnifiedState:
-    return UnifiedState(
-        messages=[],
-        statement=statement,
-        informal_proof="",
-        rethlas_attempts=0,
-        rethlas_history=[],
-        rethlas_failed=False,
-        workspace_path=ws,
-        stage="AUTOFORMALIZE",
-        pending=[], completed=[], loop_count=0,
-        max_loops=max_loops, review="",
-        archon_feedback="",
-        archon_outer_cycles=0,
-        attempt_history=[], failure_modes={},
-        informal_hints={}, previous_strategies={},
-    )
-
-
-# ── 基础工具 ──────────────────────────────────────────────────────────
-
-
-_SKILLS_DIR = Path(__file__).parent.parent.parent / "skills" / "custom"
-
-
-def _get_model_name() -> str:
-    try:
-        return get_app_config().models[0].name
-    except Exception:
-        return "deepseek-v4"
-
-
-def _load_skill_content(skill_name: str) -> str:
-    skill_path = _SKILLS_DIR / skill_name / "SKILL.md"
-    if skill_path.exists():
-        return skill_path.read_text()
-    return ""
-
-
-_DEFAULT_SKILL = _load_skill_content("archon-lean4")
-
-
-def _load_skills_deerflow() -> str:
-    """G2: 通过 DeerFlow 原生 skills storage 加载技能。"""
-    try:
-        from deerflow.skills.storage import get_or_new_skill_storage
-        storage = get_or_new_skill_storage()
-        skills = storage.load_skills(enabled_only=False)
-        parts = []
-        for s in skills:
-            if s.name in ("archon-lean4",):
-                content = s.skill_file.read_text() if s.skill_file.exists() else ""
-                if content.startswith("---"):
-                    _, _, body = content.partition("---")
-                    _, _, body = body.partition("---")
-                    content = body.strip()
-                if content:
-                    parts.append(f"## {s.name}\n{content}")
-        return "\n\n".join(parts)
-    except Exception as e:
-        print(f"[skills] ⚠ DeerFlow skills storage 不可用: {e}")
-        return _DEFAULT_SKILL
-
-
-def _bash(cmd: str, cwd: str) -> subprocess.CompletedProcess:
-    if _SANDBOX_AVAILABLE:
-        try:
-            provider = get_sandbox_provider()
-            sb_id = provider.acquire("archon-workflow")
-            sb = provider.get(sb_id)
-            if sb:
-                full_cmd = f"cd {cwd} 2>/dev/null; {cmd}" if cwd else cmd
-                result = sb.execute_command(full_cmd)
-                return subprocess.CompletedProcess(
-                    args=["sandbox", cmd],
-                    returncode=0 if not result.startswith("Error:") else 1,
-                    stdout=result if not result.startswith("Error:") else "",
-                    stderr=result if result.startswith("Error:") else "",
-                )
-        except Exception:
-            pass
-    PATH = f"{os.path.expanduser('~/.elan/bin')}:{os.environ.get('PATH', '')}"
-    return subprocess.run(
-        ["bash", "-c", cmd], cwd=cwd, capture_output=True, text=True,
-        timeout=300, env={**os.environ, "PATH": PATH},
-    )
-
-
-def _model(name=None, think=False):
-    if name is None:
-        name = _get_model_name()
-    return create_chat_model(name, thinking_enabled=think)
-
-
-def _make_attempt(file: str, line: str, loop: int, strategy: str, result: str,
-                  lean_error: str = "", failure_mode: str = "", **kw) -> dict:
     return {
-        "file": file, "line": line, "loop": loop,
-        "strategy": strategy, "result": result,
-        "lean_error": lean_error, "failure_mode": failure_mode,
-        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        **kw,
+        "messages": [],
+        "statement": statement,
+        "thread_id": "unified-proof",
+        "informal_proof": "",
+        "rethlas_attempts": 0,
+        "rethlas_history": [],
+        "rethlas_failed": False,
+        "workspace_path": ws,
+        "stage": "RETHLAS",
+        "pending": [],
+        "completed": [],
+        "loop_count": 0,
+        "max_loops": max_loops,
+        "review": "",
+        "archon_feedback": "",
+        "archon_outer_cycles": 0,
+        "attempt_history": [],
+        "failure_modes": {},
+        "informal_hints": {},
+        "previous_strategies": {},
     }
+
+
+# ── 工具函数 ────────────────────────────────────────────────────────────
 
 
 def _read_prompt(path: str) -> str:
@@ -242,774 +124,509 @@ def _extract_proof(text: str) -> str:
     return m.group(1).strip() if m else text.strip()
 
 
-def _extract_json(text: str) -> dict:
-    m = re.search(r'\{.*\}', text, re.DOTALL)
-    if m:
-        try:
-            return json.loads(m.group())
-        except json.JSONDecodeError:
-            pass
-    return {"verdict": "parse_failed"}
-
-
-def _extract_code(text: str) -> str:
-    m = re.search(r'```(?:lean)?\s*\n?(.*?)```', text, re.DOTALL)
-    return m.group(1).strip() if m else text.strip()
-
-
-def _scan(ws: str) -> list[dict]:
-    """Y5: 扫描 sorry，排除注释。"""
-    r = _bash(
-        "grep -rn 'sorry' --include='*.lean' . "
-        "| grep -v '.lake/' "
-        "| grep -v '\\s*--' "
-        "| head -200", ws)
-    items = []
-    for line in r.stdout.strip().split("\n"):
-        parts = line.split(":", 2)
-        if len(parts) >= 2:
-            items.append({"file": parts[0], "line": parts[1], "context": line})
-    return items
-
-
-def _sorries(ws: str) -> int:
-    r = _bash("grep -rn 'sorry' --include='*.lean' . | grep -v '.lake/' | wc -l", ws)
-    try:
-        return int(r.stdout.strip())
-    except ValueError:
-        return 0
-
-
-def _build(ws: str) -> tuple[bool, str]:
-    r = _bash("lake build 2>&1", ws)
-    return r.returncode == 0, r.stderr + r.stdout
-
-
-def _read(ws: str, f: str) -> str:
-    if _SANDBOX_AVAILABLE:
-        try:
-            provider = get_sandbox_provider()
-            sb_id = provider.acquire("archon-workflow")
-            sb = provider.get(sb_id)
-            if sb:
-                return sb.read_file(str(Path(ws) / f))
-        except Exception:
-            pass
-    p = Path(ws) / f
-    return p.read_text() if p.exists() else ""
-
-
-def _write(ws: str, f: str, content: str) -> None:
-    if _SANDBOX_AVAILABLE:
-        try:
-            provider = get_sandbox_provider()
-            sb_id = provider.acquire("archon-workflow")
-            sb = provider.get(sb_id)
-            if sb:
-                sb.write_file(str(Path(ws) / f), content)
-                return
-        except Exception:
-            pass
-    p = Path(ws) / f
-    p.write_text(content)
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# Phase 1：增量编译 + 结构化错误解析（与 archon_graph.py 同步）
-# ═══════════════════════════════════════════════════════════════════════
-
-
-def _classify_error(msg: str) -> str:
-    m = msg.lower()
-    if "type mismatch" in m:
-        return "type_mismatch"
-    if any(kw in m for kw in ["unknown identifier", "unknown constant", "unknown declaration",
-                               "unknown theorem", "unknown lemma", "unknown definition"]):
-        return "unknown_identifier"
-    if "failed to synthesize" in m:
-        return "failed_to_synthesize"
-    if "don't know how to" in m:
-        return "don_know_how"
-    if "invalid" in m:
-        return "invalid"
-    if any(kw in m for kw in ["expected", "unexpected"]):
-        return "syntax_error"
-    if "ambiguous" in m:
-        return "ambiguous"
-    if "is not a" in m or "has type" in m:
-        return "type_error"
-    return "other"
-
-
-def _parse_lean_errors(stderr: str) -> list[dict]:
-    errors = []
-    current = None
-    for line in stderr.split("\n"):
-        m = re.match(r'^(.+?):(\d+):(\d+):\s*(error|warning):\s*(.*)$', line)
-        if m:
-            if current:
-                errors.append(current)
-            current = {
-                "type": _classify_error(m.group(5)),
-                "severity": m.group(4),
-                "file": m.group(1),
-                "line": int(m.group(2)),
-                "col": int(m.group(3)),
-                "message": m.group(5).strip(),
-                "raw": line,
-            }
-        elif current:
-            current["message"] = current["message"].rstrip("\n") + "\n" + line
-    if current:
-        errors.append(current)
-    return errors
-
-
-def _verify_file(ws: str, f: str) -> tuple[bool, list[dict]]:
-    """Per-file incremental verification via `lake env lean` (~1-2s)."""
-    r = _bash(f"lake env lean {f} 2>&1", ws)
-    if r.returncode == 0:
-        return (True, [])
-    return (False, _parse_lean_errors(r.stderr if r.stderr else r.stdout))
-
-
-def _format_errors(errors: list[dict], max_lines: int = 40) -> str:
-    lines = []
-    for e in errors[:5]:
-        lines.append(f"{e['type']} at {e['file']}:{e['line']}:{e['col']}")
-        for l in e['message'].split("\n")[:8]:
-            lines.append(f"  {l}")
-        lines.append("")
-    combined = "\n".join(lines)
-    if len(combined) > max_lines * 80:
-        combined = combined[:max_lines * 80] + "\n... (truncated)"
-    return combined
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# B1/B2: LSP MCP 工具集成（同步 archon_graph.py）
-# ═══════════════════════════════════════════════════════════════════════
-
-
-def _get_all_tools() -> list:
-    try:
-        from deerflow.tools import get_available_tools
-        tools = get_available_tools()
-        return tools if tools else []
-    except Exception as e:
-        print(f"[tools] ⚠ 无法加载 DeerFlow 工具: {e}")
-        try:
-            return get_cached_mcp_tools()
-        except Exception:
-            return []
-
-
-def _safe_invoke(messages: list, model_name: str | None = None,
-                 max_turns: int = 3, retries: int = 2) -> str:
-    tools = _get_all_tools()
-    model = create_chat_model(model_name).bind_tools(tools) if tools else create_chat_model(model_name)
-    for attempt in range(retries + 1):
-        try:
-            history = list(messages)
-            for turn in range(max_turns):
-                response = model.invoke(history)
-                history.append(response)
-                if not getattr(response, "tool_calls", None):
-                    return str(response.content) if response.content else ""
-                for tc in response.tool_calls:
-                    tool = next((t for t in tools if t.name == tc["name"]), None)
-                    if tool:
-                        try:
-                            result_str = str(tool.invoke(tc["args"]))[:3000]
-                        except Exception as e:
-                            result_str = f"Tool error: {e}"
-                        history.append(ToolMessage(content=result_str, tool_call_id=tc["id"]))
-                    else:
-                        history.append(ToolMessage(content=f"Unknown: {tc['name']}", tool_call_id=tc["id"]))
-            return str(response.content) if response.content else ""
-        except Exception as e:
-            if attempt < retries:
-                print(f"[safe] ⚠ 调用失败 (attempt {attempt+1}/{retries+1}): {e}")
-                continue
-            print(f"[safe] ❌ 重试耗尽: {e}")
-            return ""
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# Phase 2：目标提取 + 本地搜索（同步 archon_graph.py）
-# ═══════════════════════════════════════════════════════════════════════
-
-
-def _local_lean_search(query: str, ws: str, max_results: int = 15) -> list[dict]:
-    """Local search for Lean declarations matching query.
-
-    原版对应：lean_local_search() — ripgrep 本地搜索。
-    移植版用 grep 降级。搜索：项目文件 + mathlib 主要子目录 + Lean stdlib。
-    """
-    decl_kinds = r"theorem|lemma|def|axiom|class|instance|structure|inductive|abbrev|opaque"
-    pattern = (
-        rf"^\s*(?:{decl_kinds})\s+"
-        rf"(?:[A-Za-z0-9_\'.]+\.)*{re.escape(query)}[A-Za-z0-9_\'.]*(?:\s|:)"
-    )
-    matches: list[dict] = []
-
-    def _grep(grep_dir: str, label: str) -> None:
-        nonlocal matches
-        remaining = max_results * 6 - len(matches)
-        if remaining <= 0:
-            return
-        r = _bash(
-            f"grep -rnHP '{pattern}' --include='*.lean' . | head -{remaining}",
-            grep_dir,
-        )
-        for line in r.stdout.strip().split("\n"):
-            parts = line.split(":", 2)
-            if len(parts) >= 2:
-                text = parts[2] if len(parts) > 2 else ""
-                m = re.match(rf"^\s*(\w+)\s+([A-Za-z0-9_.\']+)", text)
-                if m:
-                    matches.append({"name": m.group(2), "kind": m.group(1), "file": f"{label}:{parts[0]}"})
-
-    _grep(ws, "project")
-    for subdir in ["Algebra", "Analysis", "Data", "Logic", "SetTheory", "Topology", "NumberTheory"]:
-        tp = Path(ws) / ".lake/packages/mathlib/Mathlib" / subdir
-        if tp.exists():
-            _grep(str(tp), f"mathlib/{subdir}")
-    lean_prefix = _bash("lean --print-prefix 2>/dev/null", ws).stdout.strip()
-    if lean_prefix:
-        stdlib = Path(lean_prefix) / "src"
-        if stdlib.exists():
-            _grep(str(stdlib), "stdlib")
-
-    seen: set[str] = set()
-    scored: list[tuple[int, int, dict]] = []
-    q = query.lower()
-    for m in matches:
-        key = f"{m['name']}|{m['kind']}"
-        if key in seen:
-            continue
-        seen.add(key)
-        nl = m["name"].lower()
-        relevance = 0 if nl == q else (1 if nl.startswith(q) else (2 if q in nl else 3))
-        priority = 0 if m["file"].startswith("project") else 1
-        scored.append((relevance, priority, m))
-    scored.sort(key=lambda x: (x[0], x[1], x[2]["name"]))
-    return [m for _, _, m in scored[:max_results]]
-
-
-def _extract_goal(ws: str, f: str, line_str: str) -> dict:
-    """Extract the theorem/lemma context around a sorry."""
-    try:
-        target_line = int(line_str)
-    except (ValueError, TypeError):
-        return {"signature": "", "line": 0, "source_lines": []}
-    path = Path(ws) / f
-    if not path.exists():
-        return {"signature": "", "line": 0, "source_lines": []}
-    lines = path.read_text().split("\n")
-    decl_pattern = re.compile(
-        r'^\s*(theorem|lemma|def|example|instance|corollary|class|structure|abbrev)\b'
-    )
-    decl_start = -1
-    for i in range(min(target_line, len(lines)) - 1, -1, -1):
-        if decl_pattern.match(lines[i]):
-            decl_start = i
-            break
-    if decl_start == -1:
-        return {"signature": "", "line": target_line, "source_lines": lines}
-    decl_lines = []
-    for i in range(decl_start, min(decl_start + 30, len(lines))):
-        decl_lines.append(lines[i])
-        if i >= target_line - 1:
-            break
-        if i > decl_start and decl_pattern.match(lines[i]):
-            break
-    return {
-        "signature": "\n".join(decl_lines).strip(),
-        "line": target_line,
-        "source_lines": decl_lines,
-    }
-
-
-def _search(query: str) -> list[dict]:
-    import urllib.request, ssl
-    try:
-        ctx = ssl.create_default_context()
-        req = urllib.request.Request(
-            _SEARCH_URL,
-            data=json.dumps({"query": query, "task": "retrieve useful theorems", "num_results": 5}).encode(),
-            headers={"Content-Type": "application/json"},
-        )
-        with urllib.request.urlopen(req, context=ctx, timeout=15) as resp:
-            data = resp.read()
-            return json.loads(data.decode()) if data else []
-    except Exception:
-        return []
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# Rethlas 节点 (保留原始 Agent 工作流: generate → verify JSON → repair)
-# ═══════════════════════════════════════════════════════════════════════
+# ── Rethlas 节点 ───────────────────────────────────────────────────────
 
 
 def search_node(state: UnifiedState) -> UnifiedState:
-    """Step 0: 外部定理检索（可选）"""
-    results = _search(state["statement"])
-    if results:
-        ctx = "\n".join(
-            f"- {r.get('title','')}: {r.get('theorem','')[:200]}"
-            for r in results[:3] if r.get('theorem')
+    state = dict(state)
+    statement = state["statement"]
+    logger.info("[search] 搜索相关定理: %s", statement[:80])
+    try:
+        import ssl, urllib.request
+        ctx = ssl.create_default_context()
+        req = urllib.request.Request(
+            _SEARCH_URL,
+            data=json.dumps({"query": statement, "task": "retrieve useful theorems", "num_results": 5}).encode(),
+            headers={"Content-Type": "application/json"},
         )
-        if ctx:
-            state["messages"].append(SystemMessage(content=f"[CONTEXT] 相关定理:\n{ctx}"))
-            print(f"[search] 检索到 {len(results)} 条结果")
+        with urllib.request.urlopen(req, context=ctx, timeout=10) as resp:
+            results = json.loads(resp.read().decode()) if resp.readable() else []
+    except Exception as e:
+        logger.warning("[search] 远程搜索失败: %s", e)
+        results = []
+
+    search_context = ""
+    if results:
+        lines = ["## 相关定理"]
+        for r in results[:5]:
+            thm = r.get("theorem", "") or r.get("title", "")
+            if thm and len(thm) < 500:
+                lines.append(f"- {thm}")
+        search_context = "\n".join(lines)
+
+    state["messages"].append(HumanMessage(
+        content=f"用户命题: {statement}\n\n{search_context}\n\n请根据搜索结果生成证明。"
+    ))
     return state
 
 
 def generator_node(state: UnifiedState) -> UnifiedState:
-    """Step 1: Rethlas 非形式化证明生成 (原始 generator.md)"""
-    state["rethlas_attempts"] += 1
-    stmt = state["statement"]
-    attempt = state["rethlas_attempts"]
+    state = dict(state)
+    statement = state["statement"]
+    rethlas_attempts = state.get("rethlas_attempts", 0)
+    archon_feedback = state.get("archon_feedback", "")
 
     gen_prompt = _read_prompt(_GEN_PROMPT)
-    sys_msg = gen_prompt
+    feedback = f"\n\n## 上次 Lean 编译错误（需修复证明中的错误）\n{archon_feedback}" if archon_feedback else ""
 
-    # 如果有 Archon 反馈的 Lean 错误 → Rethlas 阅读理解
-    if state.get("archon_feedback"):
-        sys_msg += (
-            f"\n\n之前的形式化验证失败，Lean 编译错误如下:\n"
-            f"{state['archon_feedback'][-3000:]}"
-            f"\n\n请阅读这些错误，理解为什么你的非形式化证明在形式化时出了问题，"
-            f"然后修复证明。"
-        )
-        print(f"[rethlas] 正在阅读理解 Lean 错误并修复证明 (outer#{state['archon_outer_cycles']})")
-
-    # 如果有修复历史
-    if state.get("rethlas_history"):
-        last = state["rethlas_history"][-1]
-        sys_msg += (
-            f"\n\n之前的审核反馈:\n{json.dumps(last.get('verdict',{}), indent=2, ensure_ascii=False)}"
-        )
-
-    resp = _model().invoke([
-        SystemMessage(content=sys_msg),
-        HumanMessage(content=f"请证明: {stmt}"),
+    resp = make_model().invoke([
+        SystemMessage(content=gen_prompt),
+        HumanMessage(content=f"## 命题\n{statement}\n{feedback}\n\n请生成证明。"),
     ])
     proof = _extract_proof(str(resp.content))
+    logger.info("[generate] 生成了 %d 字符证明", len(proof))
+
     state["informal_proof"] = proof
-    print(f"[rethlas] generate attempt {attempt} ({len(proof)} chars)")
-    if state.get("archon_feedback"):
-        state["archon_feedback"] = ""  # 清除反馈，避免重复
+    state["rethlas_attempts"] = rethlas_attempts + 1
+    state["archon_feedback"] = ""
     return state
 
 
 def verifier_node(state: UnifiedState) -> UnifiedState:
-    """Step 2: Rethlas 自我验证 (原始 verifier.md, 输出 JSON verdict)"""
-    stmt = state["statement"]
-    proof = state["informal_proof"]
-    ver_prompt = _read_prompt(_VER_PROMPT)
+    state = dict(state)
+    proof = state.get("informal_proof", "")
 
-    resp = _model(think=False).invoke([
+    ver_prompt = _read_prompt(_VER_PROMPT)
+    resp = make_model().invoke([
         SystemMessage(content=ver_prompt),
-        HumanMessage(content=f"Statement:\n{stmt}\n\nProof:\n{proof}"),
+        HumanMessage(content=f"## 命题\n{state['statement']}\n\n## 待验证证明\n{proof}"),
     ])
-    verdict = _extract_json(str(resp.content))
+    verdict = extract_json(str(resp.content))
+    is_correct = verdict.get("verdict") == "correct"
+    logger.info("[verify] 判定: %s", "correct" if is_correct else verdict.get("verdict", "unknown"))
+
     state["rethlas_history"].append({
         "attempt": state["rethlas_attempts"],
         "verdict": verdict,
+        "proof": proof[:300],
     })
+    state["informal_hints"]["rethlas"] = proof[:2000]
 
-    v = verdict.get("verdict", "?")
-    print(f"[rethlas] verify: {v}")
-
-    if v == "correct":
-        print(f"[rethlas] ✅ 非形式化证明通过自我验证")
-    elif state["rethlas_attempts"] >= 3:
-        state["rethlas_failed"] = True
-        print(f"[rethlas] ❌ 3 轮自我验证均未通过")
-    else:
-        print(f"[rethlas] 🔄 修复 (attempt {state['rethlas_attempts']}/3)")
-
+    stage = "AUTOFORMALIZE" if (is_correct or state["rethlas_attempts"] >= 3) else "RETHLAS"
+    state["stage"] = stage
+    state["rethlas_failed"] = not is_correct and state["rethlas_attempts"] >= 3
     return state
-
-
-def route_rethlas(state: UnifiedState) -> str:
-    """Rethlas 循环路由"""
-    if state.get("rethlas_failed"):
-        return "rethlas_report"
-    if state["rethlas_attempts"] >= 3:
-        return "rethlas_report"
-    history = state.get("rethlas_history", [])
-    if history and history[-1].get("verdict", {}).get("verdict") == "correct":
-        return "planner"
-    return "generator"
 
 
 def failure_report_node(state: UnifiedState) -> UnifiedState:
-    """Rethlas 自我验证失败报告"""
-    stmt = state["statement"]
-    hist = state.get("rethlas_history", [])
-    last_v = hist[-1]["verdict"] if hist else {}
-    report = (
-        f"## 非形式化证明失败报告\n\n"
-        f"**命题：** {stmt}\n\n"
-        f"**尝试次数：** {len(hist)}\n\n"
-        f"**最后一次验证反馈：**\n"
-        f"```json\n{json.dumps(last_v, indent=2, ensure_ascii=False)}\n```"
-    )
-    state["review"] = report
-    state["stage"] = "COMPLETE"
-    print(f"[rethlas] 失败报告已生成")
+    state = dict(state)
+    attempts = state.get("rethlas_history", [])
+    lines = [f"# Rethlas 证明失败报告", f"命题: {state['statement']}", f"尝试次数: {len(attempts)}", ""]
+    for a in attempts:
+        lines.append(f"## Attempt {a['attempt']}")
+        lines.append(f"Verdict: {a.get('verdict', {}).get('verdict', '?')}")
+        lines.append(f"Proof: {a['proof'][:200]}...\n")
+    print("\n".join(lines))
     return state
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# Phase 3：自动化策略级联（同步 archon_graph.py）
-# ═══════════════════════════════════════════════════════════════════════
+# ── PR2: Autoformalize 节点 ───────────────────────────────────────────
 
 
-_AUTO_TACTICS = ["rfl", "simp", "ring", "linarith", "omega", "aesop", "grind"]
+def autoformalize_node(state: UnifiedState) -> UnifiedState:
+    """PR2: autoformalize 阶段 — 将 Rethlas 非形式化证明转为 Lean 声明骨架。"""
+    state = dict(state)
+    ws = state["workspace_path"]
+    proof = state.get("informal_proof", "")
+    statement = state["statement"]
+
+    if not ws:
+        logger.info("[autoformalize] 无项目路径，跳过")
+        return {**state, "stage": "AUTOFORMALIZE"}
+
+    project_path = Path(ws)
+    if not project_path.exists():
+        logger.info("[autoformalize] 项目目录不存在，创建: %s", ws)
+        project_path.mkdir(parents=True, exist_ok=True)
+
+    # 检查是否已有 .lean 文件
+    lean_files = list(project_path.glob("*.lean")) + list(project_path.glob("**/*.lean"))
+    lean_files = [f for f in lean_files if '.lake' not in str(f)]
+
+    if lean_files:
+        logger.info("[autoformalize] 已有 %d 个 .lean 文件，跳过 autoformalize", len(lean_files))
+        return {**state, "stage": "AUTOFORMALIZE"}
+
+    if not proof:
+        logger.warning("[autoformalize] 无非形式化证明，跳过")
+        return {**state, "stage": "AUTOFORMALIZE"}
+
+    # 调用 LLM 生成 Lean 声明骨架
+    prompt = (
+        f"你是一个 Lean4 形式化专家。请将以下数学命题和证明翻译为 Lean 4 代码。\n"
+        f"输出格式：一个完整的 .lean 文件内容，包含正确的 imports 和声明。\n"
+        f"对于需要证明但尚未完成的部分，使用 `:= by\n  sorry` 占位。\n"
+        f"重点：确保类型签名准确，声明结构与 Mathlib 风格一致。\n"
+        f"\n## 命题\n{statement}\n"
+        f"\n## 非形式化证明\n{proof[:8000]}\n"
+    )
+
+    try:
+        resp = make_model().invoke([
+            SystemMessage(content="你是 Lean4 形式化专家。将数学命题翻译为 Lean 声明骨架。"),
+            HumanMessage(content=prompt),
+        ])
+        code = extract_code(str(resp.content))
+        if code:
+            # 写入主文件
+            main_file = project_path / "Main.lean"
+            main_file.write_text(code)
+            logger.info("[autoformalize] 写入 %s (%d 字符)", main_file, len(code))
+
+            # 尝试创建 lakefile 如果不存在
+            lakefile = project_path / "lakefile.toml"
+            if not lakefile.exists():
+                lakefile_text = (
+                    '[package]\n'
+                    'name = "' + project_path.name + '"\n'
+                    'version = "0.1.0"\n'
+                    '\n'
+                    '[dependencies]\n'
+                    'mathlib = { git = "https://github.com/leanprover-community/mathlib4.git" }\n'
+                )
+                lakefile.write_text(lakefile_text)
+                logger.info("[autoformalize] 创建 %s", lakefile)
+    except Exception as e:
+        logger.exception("[autoformalize] LLM 生成失败: %s", e)
+
+    return {**state, "stage": "AUTOFORMALIZE"}
 
 
-def _try_tactics_cascade(ws: str, f: str, content: str) -> tuple[bool, str]:
-    """Try automation tactics without calling LLM.
-
-    原版对应: rfl→simp→ring→linarith→omega→aesop→grind cascade。
-    """
-    if "sorry" not in content:
-        return (True, "no_sorries")
-    for tactic in _AUTO_TACTICS:
-        new_content = content.replace("sorry", f"by {tactic}", 1)
-        _write(ws, f, new_content)
-        ok, _ = _verify_file(ws, f)
-        if ok:
-            print(f"[tactic] ✅ {f}: `{tactic}` 成功")
-            return (True, tactic)
-    _write(ws, f, content)
-    return (False, "")
+# ── PR3: Polish 节点 ───────────────────────────────────────────────────
 
 
-def _try_tactics_cascade_all(ws: str, f: str) -> tuple[bool, list[str]]:
-    """Try tactics cascade on ALL sorries in a file."""
-    content = _read(ws, f)
-    tactics_used: list[str] = []
-    while "sorry" in content:
-        ok, tactic = _try_tactics_cascade(ws, f, content)
-        if ok:
-            tactics_used.append(tactic)
-            content = _read(ws, f)
-        else:
-            _write(ws, f, content)
-            return (False, tactics_used)
-    return (True, tactics_used)
+def polish_node(state: UnifiedState) -> UnifiedState:
+    """PR3: Polish 阶段 — 最终检查、清理、refactor。"""
+    state = dict(state)
+    ws = state["workspace_path"]
+    if not ws or not Path(ws).exists():
+        return state
+
+    logger.info("[polish] 最终检查和清理")
+
+    with sandbox_context(state.get("thread_id", "unified")) as sb:
+        ok, log = build_project(ws, sb)
+        n = count_sorries(ws, sb)
+
+    logger.info("[polish] lake build: %s, sorries: %d", "PASS" if ok else "FAIL", n)
+
+    if not ok:
+        logger.warning("[polish] 编译失败，跳过清理")
+        return {**state, "review": state.get("review", "") + f"\n[polish] 最终编译: FAIL"}
+
+    # 尝试 minimize imports
+    try:
+        minimize_script = Path(__file__).parent.parent.parent / "skills" / "custom" / "archon-lean4" / "scripts" / "minimize_imports.py"
+        if minimize_script.exists():
+            logger.info("[polish] 运行 minimize_imports")
+            exec_with_sandbox(f"python3 {minimize_script} {ws}", ws, sb)
+    except Exception as e:
+        logger.warning("[polish] minimize_imports 失败: %s", e)
+
+    return {**state, "review": state.get("review", "") + f"\n[polish] 最终编译: PASS, {n} sorries"}
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# Archon 节点 (保留原始 Agent 工作流: planner → prover → reviewer)
-# ═══════════════════════════════════════════════════════════════════════
-
-
-def _classify_failure(attempt: dict) -> list[str]:
-    """Return list of failure modes from an attempt record."""
-    err = attempt.get("lean_error", "").lower()
-    modes = []
-    keywords = {
-        "missing_infrastructure": ["unknown identifier", "unknown constant", "unknown declaration",
-                                    "unknown theorem", "unknown lemma", "not found in"],
-        "typeclass": ["failed to synthesize", "typeclass", "instance", "no instances"],
-        "wrong_construction": ["type mismatch", "expected", "don't know how to", "has type"],
-    }
-    for mode, kws in keywords.items():
-        if any(kw in err for kw in kws):
-            modes.append(mode)
-    if attempt.get("result") == "abandoned":
-        modes.append("early_stopping")
-    if attempt.get("result") == "build_failed":
-        modes.append("compilation_error")
-    return modes if modes else ["unknown"]
+# ── Archon 节点 ─────────────────────────────────────────────────────────
 
 
 def planner_node(state: UnifiedState) -> UnifiedState:
     """
-    增强版 planner: 扫描 sorry + 分析失败模式 + 生成非形式化指引
+    PR1: Plan Agent — LLM 驱动（与 archon_graph.py 同步）。
+    P2: 读取 USER_HINTS.md 注入上下文。
+    P3: 扫描 .lean 文件中的 /- USER: ... -/ 注释。
     """
     ws = state["workspace_path"]
-    if not ws or not Path(ws).exists():
-        print("[archon] 未提供 Lean 项目路径")
-        state["stage"] = "COMPLETE"
-        return state
+    if not ws:
+        return {**state, "stage": "COMPLETE"}
 
-    state["loop_count"] += 1
-    sorries = _scan(ws)
-    print(f"[archon] planner loop#{state['loop_count']}: {len(sorries)} sorries")
+    loop = state.get("loop_count", 0) + 1
+    logger.info("[plan-node] === loop #%d ===", loop)
+
+    with sandbox_context(state.get("thread_id", "unified")) as sb:
+        sorries = scan_sorries(ws, sb)
+    logger.info("[plan-node] %d sorries found", len(sorries))
 
     if not sorries:
-        state["stage"] = "COMPLETE"
-        return state
+        return {**state, "loop_count": loop, "stage": "COMPLETE"}
 
-    # ── 分析 attempt_history → 识别失败模式 ──
-    state["failure_modes"] = {}
-    state["previous_strategies"] = {}
+    # 分析 attempt_history 失败模式
     all_attempts = state.get("attempt_history", [])
-
+    failure_modes = {}
+    previous_strategies = {}
     for s in sorries:
         fn = s["file"]
         file_attempts = [a for a in all_attempts if a["file"] == fn]
         if not file_attempts:
             continue
-
-        state["previous_strategies"][fn] = list({a.get("strategy", "?") for a in file_attempts})
+        previous_strategies[fn] = list({a.get("strategy", "?") for a in file_attempts})
         recent = file_attempts[-3:]
         modes = set()
         for a in recent:
-            for m in _classify_failure(a):
+            for m in classify_failure(a):
                 modes.add(m)
-        state["failure_modes"][fn] = list(modes)
+        failure_modes[fn] = list(modes)
         if modes:
-            print(f"[archon] ⚠ {fn}: {modes}")
+            logger.info("[plan-node] %s: 失败模式 %s", fn, modes)
 
-    # ── 构建提示词上下文 ──
-    files = _bash("find . -name '*.lean' -not -path './.lake/*'", ws).stdout
+    # P2: USER_HINTS.md
+    hints_path = Path(ws) / ".archon-journal" / "USER_HINTS.md"
+    user_hints = ""
+    if hints_path.exists():
+        user_hints = hints_path.read_text().strip()
+        if user_hints:
+            logger.info("[plan-node] 读取 USER_HINTS.md")
 
-    failure_parts = []
+    # P3: /- USER: ... -/ 注释扫描
+    lean_user_comments = {}
     for s in sorries:
         fn = s["file"]
-        modes = state.get("failure_modes", {}).get(fn, [])
-        strategies = state.get("previous_strategies", {}).get(fn, [])
-        if modes or strategies:
-            line = f"  {fn}"
+        content = Path(ws, fn).read_text() if Path(ws, fn).exists() else ""
+        for m in re.finditer(r'/-\s*USER:?(.*?)-/', content, re.DOTALL):
+            comment = m.group(1).strip()
+            if comment:
+                line_before = content[:m.start()].count("\n") + 1
+                lean_user_comments[fn] = f"[行 {line_before}] User 注释: {comment[:500]}"
+
+    # Rethlas 非形式化证明注入
+    informal_hints = dict(state.get("informal_hints", {}))
+    rethlas_proof = state.get("informal_proof", "")
+    if rethlas_proof:
+        for s in sorries:
+            fn = s["file"]
+            if fn not in informal_hints:
+                informal_hints[fn] = rethlas_proof[:500]
+
+    # P1: LLM 驱动规划
+    needs_llm = bool(user_hints) or bool(all_attempts)
+    if needs_llm:
+        plan_lines = [
+            "你是 Archon Plan Agent。分析当前证明状态并生成非形式化指引。",
+            "",
+            f"## 循环 #{loop}",
+            f"项目路径: {ws}",
+            "",
+            "## 待处理 sorries",
+        ]
+        for s in sorries:
+            fn = s["file"]
+            modes = failure_modes.get(fn, [])
+            strategies = previous_strategies.get(fn, [])
+            user_c = lean_user_comments.get(fn, "")
+            plan_lines.append(f"- {fn}:{s['line']}")
             if modes:
-                line += f"\n    失败模式: {', '.join(modes)}"
+                plan_lines.append(f"  失败模式: {', '.join(modes)}")
             if strategies:
-                line += f"\n    已尝试: {', '.join(strategies)}"
-            failure_parts.append(line)
-    failure_ctx = "\n".join(failure_parts)
+                plan_lines.append(f"  已尝试: {', '.join(strategies)}")
+            if user_c:
+                plan_lines.append(f"  {user_c}")
 
-    # ── 提取每个 sorry 的精确目标 ──
-    goals = []
-    for s in sorries:
-        g = _extract_goal(ws, s["file"], s["line"])
-        if g.get("signature"):
-            goals.append({"file": s["file"], "line": s["line"], "signature": g["signature"]})
+        if user_hints:
+            plan_lines.extend(["", "## 用户提示", user_hints])
 
-    # ── 搜索 mathlib（远程 + 本地） ──
-    search_results = []
-    if sorries and goals:
-        query = goals[0]["signature"][:100]
-        # 远程
-        remote = _search(query)
-        for r in remote[:3]:
-            thm = r.get("theorem", "") or r.get("title", "")
-            if thm and len(thm) < 500:
-                search_results.append(f"- {thm} (remote)")
-        # 本地
-        local = _local_lean_search(goals[0]["signature"].split(":", 1)[0] if ":" in goals[0]["signature"] else goals[0]["signature"], ws, 5)
-        for r in local[:5]:
-            search_results.append(f"- {r['kind']} {r['name']} ({r['file']})")
+        plan_lines.extend([
+            "",
+            "## 输出要求",
+            "对每个文件生成简短的非形式化证明指引（1-3 句）。",
+            "格式：每行一个文件，用 | 分隔文件路径和指引。",
+        ])
 
-    # ── 让模型生成解析和指引 ──
-    prompt = (
-        f"## 项目文件\n{files}"
-        f"\n## 待填充的 sorry\n" + "\n".join(s["context"] for s in sorries)
-    )
+        try:
+            resp = make_model().invoke([
+                SystemMessage(content="你是 Archon Plan Agent。分析证明状态，提供指引。"),
+                HumanMessage(content="\n".join(plan_lines)),
+            ])
+            plan_text = str(resp.content)
+            for line in plan_text.split("\n"):
+                if "|" in line:
+                    parts = line.split("|", 1)
+                    fn_candidate = parts[0].strip().rstrip(":")
+                    hint = parts[1].strip()
+                    if hint and len(hint) > 10:
+                        clean = re.sub(r'^\d+[.\\)\\s]*', '', hint)
+                        if clean:
+                            informal_hints[fn_candidate] = clean[:500]
+                            logger.info("[plan-node] 指引 %s: %s", fn_candidate, clean[:80])
+        except Exception as e:
+            logger.warning("[plan-node] LLM 规划失败: %s", e)
 
-    if goals:
-        g_lines = []
-        for g in goals:
-            g_lines.append(f"### {g['file']}:{g['line']}\n```lean\n{g['signature']}\n```")
-        prompt += "\n## 每个 sorry 的精确定理签名\n" + "\n".join(g_lines)
+    return {
+        **state,
+        "loop_count": loop,
+        "failure_modes": failure_modes,
+        "previous_strategies": previous_strategies,
+        "informal_hints": informal_hints,
+        "pending": sorries,
+        "stage": "PROVER",
+    }
 
-    if failure_ctx:
-        prompt += f"\n## 历史失败\n{failure_ctx}"
 
-    if search_results:
-        prompt += "\n## Mathlib 相关定理\n" + "\n".join(search_results)
+# ── D1: Subagent 配置 ──────────────────────────────────────────────────
 
-    prompt += (
-        "\n## 任务\n"
-        "对每个 sorry，按以下格式输出：\n"
-        "FILE|PRIORITY|PROOF_HINT|TACTIC\n\n"
-        "字段: FILE(路径全匹配) | PRIORITY(high/medium/low) | "
-        "PROOF_HINT(2-4句非形式化证明指引) | TACTIC(建议策略)\n"
-        "有历史失败的请换策略。不要输出 Lean 代码。"
-    )
 
-    existing_hints = state.get("informal_hints", {})
-    if existing_hints:
-        hint_lines = [f"  {k}: {v}" for k, v in existing_hints.items()]
-        prompt += f"\n## 已有指引\n" + "\n".join(hint_lines)
+UNIFIED_PROVER_CONFIG = SubagentConfig(
+    name="unified-prover",
+    description="填充 Lean 文件中的 sorry 并编译验证",
+    system_prompt="你是 Lean4 形式化证明助手。\n\n"
+        "你的任务是：\n"
+        "1. 用 `read_file` 读取文件内容\n"
+        "2. 用 `lean_goal` 获取编译时目标状态\n"
+        "3. 用 `lean_local_search` 搜索相关引理\n"
+        "4. 用 `write_file` 写入证明代码（只修改 `sorry` 区域）\n"
+        "5. 用 `lean_verify` 编译验证\n"
+        "6. 如果失败，检查 `lean_diagnostic_messages` 并修复\n"
+        "7. 所有 sorry 通过后，输出最终文件内容。",
+    tools=None,
+    disallowed_tools=["task", "ask_clarification"],
+    model="inherit",
+    max_turns=30,
+    timeout_seconds=600,
+)
 
-    resp = _model().invoke([HumanMessage(content=prompt)])
 
-    # ── 解析输出 ──
-    hints = {}
-    for line in str(resp.content).strip().split("\n"):
-        parts = [p.strip() for p in line.split("|")]
-        if len(parts) >= 3:
-            for s in sorries:
-                sf = s["file"]
-                if parts[0] in sf or sf in parts[0]:
-                    hint = parts[2]
-                    if len(parts) >= 4 and parts[3]:
-                        hint += f"\n策略建议: {parts[3]}"
-                    hints[sf] = hint
-                    break
-
-    state["informal_hints"] = hints
-    state["pending"] = sorries
-    state["stage"] = "PROVER"
-    print(f"[archon] planner: {len(hints)} hints generated")
-    return state
-
-def prover_node(state: UnifiedState) -> UnifiedState:
-    """
-    全面拥抱 DeerFlow: 使用 create_deerflow_agent() 证明。
-    """
-    from deerflow.tools import get_available_tools
-
+def _spawn_prove_subagent(executor: SubagentExecutor, t: dict, state: UnifiedState) -> str | None:
     ws = state["workspace_path"]
-    if not ws:
-        return state
-    pending = state.get("pending", [])
+    f = t["file"]
+    line = t.get("line", "?")
     hints = state.get("informal_hints", {})
     failure_modes = state.get("failure_modes", {})
     loop_count = state["loop_count"]
+
+    with sandbox_context(state.get("thread_id", "unified")) as sb:
+        content = read_with_sandbox(ws, f, sb)
+        if not content or "sorry" not in content:
+            return None
+        cascade_ok, tactics_used = try_tactics_cascade_all(ws, f, sb)
+        if cascade_ok:
+            logger.info("[prove-node] %s 自动化策略: %s", f, tactics_used)
+            return None
+        goal_sig = extract_goal(
+            content.split("\n"),
+            int(line) if line.isdigit() else 0,
+        ).get("signature", "")
+
+    hint = hints.get(f, hints.get("rethlas", ""))
+    fail_modes = failure_modes.get(f, [])
+    goal_text = f"\n## 目标定理\n```lean\n{goal_sig}\n```" if goal_sig else ""
+    hint_text = f"\n## 证明指引\n{hint}" if hint else ""
+    fail_text = ""
+    if fail_modes:
+        mode_advice = {
+            "missing_infrastructure": "尝试 induction/recursion 基础方法",
+            "typeclass": "显式提供 haveI/letI 实例",
+            "wrong_construction": "重新检查类型签名",
+            "early_stopping": "分解为更小子目标",
+        }
+        advices = [mode_advice.get(m, "") for m in fail_modes if m in mode_advice]
+        if advices:
+            fail_text = f"\n## 历史失败\n避免: {', '.join(fail_modes)}\n建议: {'; '.join(advices)}"
+
+    task_msg = f"请处理 Lean 项目的文件 **{f}**（行 {line}）。{goal_text}{hint_text}{fail_text}"
+    tid = f"prove-{Path(f).stem}"
+    executor.execute_async(task_msg, task_id=tid)
+    return tid
+
+
+def _collect_prove_result(task_id: str, t: dict, state: UnifiedState, max_wait: int = 660) -> None:
+    ws = state["workspace_path"]
+    f = t["file"]
+    deadline = time.time() + max_wait
+
+    while time.time() < deadline:
+        result = get_background_task_result(task_id)
+        if result is None:
+            break
+
+        if result.status == SubagentStatus.COMPLETED:
+            text = result.result or ""
+            if text and "sorry" not in text:
+                code = extract_code(text)
+                if code:
+                    write_with_sandbox(ws, f, code)
+                logger.info("[prove-node] subagent %s 完成", f)
+            else:
+                logger.warning("[prove-node] subagent %s 未完成", f)
+            cleanup_background_task(task_id)
+            return
+
+        if result.status in (SubagentStatus.FAILED, SubagentStatus.TIMED_OUT):
+            err = result.error or "unknown error"
+            logger.warning("[prove-node] subagent %s %s: %s", f, result.status.value, err[:200])
+            cleanup_background_task(task_id)
+            return
+
+        if result.status == SubagentStatus.CANCELLED:
+            logger.warning("[prove-node] subagent %s 被取消", f)
+            cleanup_background_task(task_id)
+            return
+
+        time.sleep(2)
+
+    logger.warning("[prove-node] subagent %s 轮询超时 (%ds)", f, max_wait)
+
+
+def prover_node(state: UnifiedState) -> UnifiedState:
+    from deerflow.tools import get_available_tools
+
+    ws = state["workspace_path"]
+    pending = state.get("pending", [])
+    thread_id = state.get("thread_id", "unified")
+
     if not pending:
         return state
 
-    print(f"[archon] 处理 {len(pending)} 个文件 (create_deerflow_agent)")
-    all_tools = get_available_tools()
+    logger.info("[prove-node] 处理 %d 个文件 (SubagentExecutor)", len(pending))
 
+    all_tools = get_available_tools(subagent_enabled=True)
+    executor = SubagentExecutor(config=UNIFIED_PROVER_CONFIG, tools=all_tools, thread_id=thread_id)
+
+    completed = list(state.get("completed", []))
+    task_ids = []
     for t in pending:
         f = t["file"]
-        path = Path(ws) / f
-        if not path.exists() or "sorry" not in path.read_text():
+        if not (Path(ws) / f).exists():
             continue
+        tid = _spawn_prove_subagent(executor, t, state)
+        if tid:
+            task_ids.append((tid, t))
 
-        line = t.get("line", "?")
-        goal = _extract_goal(ws, f, line)
-        goal_sig = goal.get("signature", "")
-        hint = hints.get(f, "")
-        fail_modes = failure_modes.get(f, [])
+    for tid, t in task_ids:
+        _collect_prove_result(tid, t, state)
 
-        cascade_ok, tactics_used = _try_tactics_cascade_all(ws, f)
-        if cascade_ok:
-            print(f"[archon] ✅ {f} 全部通过自动化策略: {tactics_used}")
-            state["completed"].append(f)
-            state["attempt_history"].append(_make_attempt(
-                f, line, loop_count, f"tactics_cascade:{','.join(tactics_used)}", "success"))
-            continue
+    done = set(state.get("completed", [])) | set(completed)
+    new_pending = [t for t in pending if t["file"] not in done]
+    logger.info("[prove-node] 本轮: %d 完成, %d 剩余", len(done), len(new_pending))
+    return {**state, "pending": new_pending}
 
-        sys_prompt = "你是 Lean4 形式化证明助手。将文件中的 `sorry` 替换为正确且完整的 Lean 证明。"
-        if goal_sig:
-            sys_prompt += f"\n\n目标:\n```lean\n{goal_sig}\n```"
-        if hint:
-            sys_prompt += f"\n\n指引:\n{hint}"
-        skill_text = _load_skills_deerflow() or _DEFAULT_SKILL
-        if skill_text:
-            sys_prompt += f"\n\n技能参考:\n{skill_text[:2000]}"
-        if "missing_infrastructure" in fail_modes:
-            sys_prompt += "\n注意: induction/recursion。"
-        if "typeclass" in fail_modes:
-            sys_prompt += "\n注意: haveI/letI。"
-        if "wrong_construction" in fail_modes:
-            sys_prompt += "\n注意: 检查类型签名。"
-        if "early_stopping" in fail_modes:
-            sys_prompt += "\n注意: 分解子目标。"
 
-        agent = create_deerflow_agent(
-            model=create_chat_model(_get_model_name()),
-            tools=all_tools,
-            features=RuntimeFeatures(sandbox=True, loop_detection=True),
-            system_prompt=sys_prompt,
-            checkpointer=MemorySaver(),
-            name=f"prove-{Path(f).stem}",
-        )
-        try:
-            result = agent.invoke({"messages": [
-                HumanMessage(content=(f"请处理 {f}。\n"
-                    f"1. read_file → 2. lean_goal → 3. lean_local_search\n"
-                    f"4. write_file → 5. lean_verify → 6. 失败则修复\n"
-                    f"7. 全部 sorry 通过后输出内容")),
-            ]})
-            msgs = result.get("messages", [])
-            last = msgs[-1] if msgs else None
-            text = str(last.content) if last and hasattr(last, "content") else ""
-            if text and "sorry" not in text:
-                code = _extract_code(text)
-                if code:
-                    _write(ws, f, code)
-                print(f"[archon] ✅ {f} (DeerFlow agent)")
-                state["completed"].append(f)
-                state["attempt_history"].append(_make_attempt(
-                    f, line, loop_count, "deerflow_agent", "success"))
-            else:
-                print(f"[archon] ❌ {f} agent 未完成")
-                state["attempt_history"].append(_make_attempt(
-                    f, line, loop_count, "deerflow_agent", "abandoned"))
-        except Exception as e:
-            print(f"[archon] ❌ {f} agent 异常: {e}")
-            state["attempt_history"].append(_make_attempt(
-                f, line, loop_count, "deerflow_agent", "error",
-                lean_error=str(e)[:500], failure_mode="agent_error"))
-        del agent
-
-    done = {a["file"] for a in state["attempt_history"] if a.get("result") == "success"}
-    state["pending"] = [t for t in pending if t["file"] not in done]
-    print(f"[archon] 本轮: {len(done)} 完成, {len(state['pending'])} 剩余")
-    return state
 def reviewer_node(state: UnifiedState) -> UnifiedState:
-    """reviewer: lake build 验证 + 失败分析 + 路由决策"""
     ws = state["workspace_path"]
-    if not ws:
-        state["stage"] = "COMPLETE"
-        return state
 
-    ok, log = _build(ws)
-    n = _sorries(ws)
+    with sandbox_context(state.get("thread_id", "unified")) as sb:
+        ok, log = build_project(ws, sb)
+        n = count_sorries(ws, sb)
 
-    # ── 审查摘要 ──
     done_count = len(state.get("completed", []))
+    pending_count = len(state.get("pending", []))
     total_attempts = len(state.get("attempt_history", []))
-    all_modes = {}
-    for a in state.get("attempt_history", []):
-        for m in a.get("failure_mode", "").split(","):
-            m = m.strip()
-            if m:
-                all_modes[m] = all_modes.get(m, 0) + 1
 
-    failure_summary = ""
-    if all_modes:
-        sorted_m = sorted(all_modes.items(), key=lambda x: -x[1])
-        failure_summary = " | ".join(f"{m}({c})" for m, c in sorted_m)
+    review = f"Build: {'PASS' if ok else 'FAIL'}, sorries: {n}, 完成: {done_count}, 待处理: {pending_count}, 总尝试: {total_attempts}"
+    logger.info("[review-node] %s", review)
 
-    r = f"Build: {'PASS' if ok else 'FAIL'}, sorries: {n}, 尝试: {total_attempts}"
-    if failure_summary:
-        r += f"\n失败模式: {failure_summary}"
-    state["review"] = r
-    print(f"[archon] review: {r}")
-
+    stage = state["stage"]
     if ok and n == 0:
-        state["stage"] = "COMPLETE"
-        print(f"[archon] ✅ 全部证明通过 Lean 编译验证")
+        stage = "COMPLETE"
     elif state["loop_count"] >= state["max_loops"]:
-        # Archon 内部循环耗尽 → 送回 Rethlas
-        state["archon_feedback"] = log[-4000:]
-        state["archon_outer_cycles"] += 1
-        print(f"[archon] ⚠ 形式化失败({state['loop_count']}次), 送 Rethlas")
-    else:
-        print(f"[archon] 继续 Archon 内部循环 (loop {state['loop_count']}/{state['max_loops']})")
-    return state
+        stage = "COMPLETE"
 
+    archon_feedback = state.get("archon_feedback", "")
+    if not ok and n > 0:
+        archon_feedback = log[-2000:] if len(log) > 2000 else log
+        stage = "RETHLAS"
 
-# ═══════════════════════════════════════════════════════════════════════
-# 节点：review_agent_node（新增——证明期刊与推荐）
-# ═══════════════════════════════════════════════════════════════════════
+    return {**state, "review": review, "stage": stage, "archon_feedback": archon_feedback}
 
 
 def review_agent_node(state: UnifiedState) -> UnifiedState:
-    """审查代理：分析尝试历史，写入 journal 文件"""
     ws = state["workspace_path"]
     if not ws or not Path(ws).exists():
         return state
@@ -1020,94 +637,74 @@ def review_agent_node(state: UnifiedState) -> UnifiedState:
     completed = state.get("completed", [])
     failure_modes = state.get("failure_modes", {})
 
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
     journal_root = Path(ws) / ".archon-journal"
     session_dir = journal_root / f"session_{loop}"
     session_dir.mkdir(parents=True, exist_ok=True)
 
-    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-
-    file_groups: dict[str, list[dict]] = {}
+    file_groups = {}
     for a in attempts:
-        fn = a["file"]
-        file_groups.setdefault(fn, []).append(a)
+        file_groups.setdefault(a["file"], []).append(a)
 
     all_files = set(file_groups.keys()) | {s["file"] for s in pending} | set(completed)
+    milestones = []
+    summary_lines = [f"# Session {loop} — 审查报告", "", f"时间: {now}", "## 概览", ""]
+    rec_lines = [f"# Session {loop} — 推荐", "## 优先级", ""]
 
-    milestones: list[dict] = []
-    summary_lines = [
-        f"# Session {loop} — 审查报告 (Unified Prover)", f"",
-        f"时间: {now}", f"循环: #{loop}", f"",
-        "## 概览", f"",
-    ]
-    rec_lines = [f"# Session {loop} — 推荐", f"", "## 优先级", f""]
+    s_after = len(pending)
+    summary_lines.append(f"- 本轮后 sorry: {s_after}")
+    summary_lines.append(f"- 完成: {len(completed)}")
+    summary_lines.append(f"- 总尝试: {len(attempts)}\n")
 
-    sorries_before = len(pending) + len(completed)
-    sorries_after = len(pending)
-    summary_lines.extend([
-        f"- 本轮前 sorry: {sorries_before}",
-        f"- 本轮后 sorry: {sorries_after}",
-        f"- 本轮完成: {len(completed)}",
-        f"- 总尝试: {len(attempts)}", f"",
-    ])
-
-    blocked: list[str] = []
+    blocked = []
+    closest = []
     for fn in sorted(all_files):
         fn_atts = file_groups.get(fn, [])
         fn_modes = failure_modes.get(fn, [])
         is_solved = fn in completed
-
         if fn_atts:
             last = fn_atts[-1]
-            status = "solved" if is_solved else "blocked" if last.get("result") == "abandoned" else "partial"
+            status = "solved" if is_solved else ("blocked" if last.get("result") == "abandoned" else "partial")
         else:
             status = "not_started"
 
-        if status == "blocked":
+        if is_solved:
+            closest.append(fn)
+        elif status == "blocked":
             blocked.append(fn)
+        else:
+            closest.append(fn)
 
-        attempt_details = []
-        for i, a in enumerate(fn_atts):
-            attempt_details.append({
-                "attempt": i + 1,
-                "strategy": a.get("strategy", "?"),
-                "lean_error": a.get("lean_error", "")[:300],
-                "result": a.get("result", "?"),
-                "insight": f"失败模式: {', '.join(fn_modes)}" if fn_modes and a["result"] != "success" else "",
-            })
+        attempt_details = [
+            {"attempt": i + 1, "strategy": a.get("strategy", "?")[:60],
+             "lean_error": a.get("lean_error", "")[:300], "result": a.get("result", "?")}
+            for i, a in enumerate(fn_atts)
+        ]
 
         next_steps_map = {
-            "missing_infrastructure": "换策略：尝试 induction/recursion 基础方法",
+            "missing_infrastructure": "尝试 induction/recursion",
             "typeclass": "显式提供 haveI/letI 实例",
             "wrong_construction": "重新检查类型签名",
             "early_stopping": "分解为更小子目标",
         }
-        next_steps = "继续尝试"
-        for mode, step in next_steps_map.items():
-            if mode in fn_modes:
-                next_steps = step
-                break
+        next_steps = next((v for k, v in next_steps_map.items() if k in fn_modes), "继续尝试")
         if status == "solved":
             next_steps = "已验证通过"
 
         milestones.append({
-            "timestamp": now,
-            "status": status,
-            "target": {"file": fn, "theorem": ""},
+            "timestamp": now, "status": status,
+            "target": {"file": fn},
             "session": {"id": f"session_{loop}", "model": "deepseek-v4"},
-            "findings": {
-                "blocker": ", ".join(fn_modes) if status != "solved" else "",
-                "key_lemmas_used": [a.get("strategy", "") for a in fn_atts if a["result"] == "success"],
-            },
-            "attempts": attempt_details,
-            "next_steps": next_steps,
+            "findings": {"blocker": ", ".join(fn_modes) if status != "solved" else "", "key_lemmas_used": []},
+            "attempts": attempt_details, "next_steps": next_steps,
         })
 
         summary_lines.append(f"### {fn}")
-        summary_lines.append(f"- 状态: {status} | 尝试: {len(fn_atts)} | 模式: {', '.join(fn_modes) or '无'}")
+        summary_lines.append(f"- {status} | 尝试: {len(fn_atts)} | 模式: {', '.join(fn_modes) or '无'}")
         for d in attempt_details:
             err = d["lean_error"][:100] if d["lean_error"] else "-"
-            summary_lines.append(f"  - Attempt {d['attempt']}: [{d['result']}] {d['strategy'][:60]}")
-        summary_lines.append(f"")
+            summary_lines.append(f"  - Attempt {d['attempt']}: [{d['result']}] {d['strategy']}")
+        summary_lines.append("")
 
         if status in ("blocked", "partial"):
             rec_lines.append(f"### {'❌' if status == 'blocked' else '🔄'} {fn}")
@@ -1118,82 +715,100 @@ def review_agent_node(state: UnifiedState) -> UnifiedState:
         for m in milestones:
             f.write(json.dumps(m, ensure_ascii=False) + "\n")
     if blocked:
-        rec_lines.append(f"\n## 阻塞列表\n" + "\n".join(f"- {fn}" for fn in blocked))
+        rec_lines.append("\n## 阻塞列表\n" + "\n".join(f"- {fn}" for fn in blocked))
     (session_dir / "recommendations.md").write_text("\n".join(rec_lines))
 
     status_lines = [
-        f"# Project Status (更新于 {now})", f"",
+        f"# Project Status ({now})", "",
         f"## 总体进展",
-        f"- 总 sorry: {sorries_after}",
-        f"- 本轮解决: {len(completed)}",
-        f"- 总尝试: {len(attempts)}", f"",
+        f"- 总 sorry: {s_after}", f"- 完成: {len(completed)}",
+        f"- 总尝试: {len(attempts)}", "",
         f"## 已知阻塞",
     ]
     status_lines += [f"- `{fn}`: {', '.join(failure_modes.get(fn, []))}" for fn in blocked] or ["- (无)"]
     (journal_root / "PROJECT_STATUS.md").write_text("\n".join(status_lines))
 
-    print(f"[review-agent] 期刊已写入 {session_dir}: {len(milestones)} 文件")
+    # P2: 写入 USER_HINTS.md
+    user_hints_path = journal_root / "USER_HINTS.md"
+    if not user_hints_path.exists():
+        hints_content = [
+            "# USER_HINTS.md — 用户提示",
+            "",
+            "在下一轮 plan 时，在下方写入你对证明方向的指引。",
+            "清空此文件可清除所有提示。",
+            "",
+            "示例：",
+            "- 优先处理 Core.lean 中的 sorry",
+            "- 对于 lemma x，尝试用 Finset.sum_comm 替代 ring",
+            "- 不要重复尝试类型构造错误: 换一个构造方法",
+            "",
+        ]
+        if blocked:
+            hints_content.append("## 已知阻塞（不要重复尝试）")
+            for fn in blocked:
+                hints_content.append(f"- {fn}: {', '.join(failure_modes.get(fn, []))}")
+            hints_content.append("")
+        user_hints_path.write_text("\n".join(hints_content))
+
+    logger.info("[review-agent-node] 期刊已写入 %s", session_dir)
     return state
 
 
+# ── 路由 ──────────────────────────────────────────────────────────────
+
+
+def route_rethlas(state: UnifiedState) -> str:
+    stage = state.get("stage", "")
+    if stage == "AUTOFORMALIZE":
+        return "autoformalize"
+    if stage == "RETHLAS" or state.get("rethlas_failed"):
+        return "rethlas_report" if state.get("rethlas_failed") else "generator"
+    return "generator"
+
+
 def route_archon(state: UnifiedState) -> str:
-    """Archon 路由: COMPLETE / 经 review_agent 重试 / 送回 Rethlas"""
-    if state["stage"] == "COMPLETE":
-        return END
-    if state.get("archon_feedback"):
-        return "generator"       # 送回 Rethlas 修复非形式化证明
-    return "review_agent_node"   # Archon 内部重试（先经审查代理）
+    stage = state.get("stage", "")
+    if stage == "COMPLETE":
+        return "polish"
+    if stage == "RETHLAS":
+        return "generator"
+    return "review_agent_node"
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# 构建统一图
-# ═══════════════════════════════════════════════════════════════════════
+# ── 图 ────────────────────────────────────────────────────────────────
 
 
 def build_unified_graph():
     w = StateGraph(UnifiedState)
-
-    # Rethlas 节点 (保留原 Agent 工作流)
     w.add_node("search", search_node)
     w.add_node("generator", generator_node)
     w.add_node("verifier", verifier_node)
     w.add_node("rethlas_report", failure_report_node)
-
-    # Archon 节点 (保留原 Agent 工作流)
+    w.add_node("autoformalize", autoformalize_node)
     w.add_node("planner", planner_node)
     w.add_node("prover", prover_node)
     w.add_node("reviewer", reviewer_node)
+    w.add_node("polish", polish_node)
     w.add_node("review_agent_node", review_agent_node)
-
-    # 入口
     w.set_entry_point("search")
-
-    # Rethlas 边: search → generate → verify → (generate|planner|report)
     w.add_edge("search", "generator")
     w.add_edge("generator", "verifier")
     w.add_conditional_edges("verifier", route_rethlas, {
-        "generator": "generator",
-        "planner": "planner",
-        "rethlas_report": "rethlas_report",
+        "generator": "generator", "autoformalize": "autoformalize", "rethlas_report": "rethlas_report",
     })
     w.add_edge("rethlas_report", END)
-
-    # Archon 边: planner → prover → reviewer
-    # reviewer → generator(Lean FAIL→Rethlas修复) | review_agent_node(审查) | END
+    w.add_edge("autoformalize", "planner")
     w.add_edge("planner", "prover")
     w.add_edge("prover", "reviewer")
     w.add_conditional_edges("reviewer", route_archon, {
-        "generator": "generator",     # Lean 错误 → Rethlas 阅读理解并修复
-        "review_agent_node": "review_agent_node",  # 审查后重试
-        END: END,                      # COMPLETE
+        "generator": "generator", "review_agent_node": "review_agent_node", "polish": "polish",
     })
+    w.add_edge("polish", "review_agent_node")
     w.add_edge("review_agent_node", "planner")
-
     return w.compile()
 
 
-def run_unified_workflow(statement: str, workspace_path: str = "",
-                         max_loops: int = 5) -> dict:
+def run_unified_workflow(statement: str, workspace_path: str = "", max_loops: int = 5) -> dict:
     return build_unified_graph().invoke(
         fresh_state(statement, workspace_path, max_loops),
         {"configurable": {"thread_id": "unified-proof"}},

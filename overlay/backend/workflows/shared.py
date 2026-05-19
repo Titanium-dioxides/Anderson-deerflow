@@ -174,10 +174,11 @@ def verify_file(ws: str, f: str, sb=None) -> tuple[bool, list[dict]]:
 
 
 def try_tactics_cascade(ws: str, f: str, content: str, sb=None) -> tuple[bool, str]:
-    """对单个 sorry 尝试自动化策略。"""
+    """G11: 对单个 sorry 尝试自动化策略。"""
     if "sorry" not in content:
         return (True, "no_sorries")
-    for tactic in AUTO_TACTICS:
+    tactics = AUTO_TACTICS_EXTENDED if USE_EXTENDED_TACTICS else AUTO_TACTICS
+    for tactic in tactics:
         new_content = content.replace("sorry", f"by {tactic}", 1)
         try:
             write_with_sandbox(ws, f, new_content, sb)
@@ -347,6 +348,10 @@ def extract_goal(lines: list[str], target_line: int) -> dict:
 
 
 AUTO_TACTICS = ["rfl", "simp", "ring", "linarith", "omega", "aesop", "grind"]
+
+# G11: 扩展 tactics（exact?/apply? — 可能超时，默认不启用）
+AUTO_TACTICS_EXTENDED = ["rfl", "simp", "ring", "linarith", "omega", "aesop", "grind", "exact?", "apply?"]
+USE_EXTENDED_TACTICS = False  # 设为 True 启用 exact?/apply?
 
 
 # ═══════════════════════════════════════════════════════════════════════

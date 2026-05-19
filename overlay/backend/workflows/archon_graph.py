@@ -667,25 +667,101 @@ def review_agent(state: ArchonState) -> ArchonState:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# G1: Autoformalize 节点
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def autoformalize_node(state: ArchonState) -> ArchonState:
+    """G1: autoformalize — 检查 Lean 项目结构。"""
+    ws = state["workspace_path"]
+    project_path = Path(ws)
+    if not project_path.exists():
+        return {**state, "stage": "COMPLETE"}
+    lean_files = [f for f in list(project_path.glob("*.lean")) + list(project_path.glob("**/*.lean")) if '.lake' not in str(f)]
+    if not lean_files:
+        return {**state, "stage": "COMPLETE"}
+    lakefile = project_path / "lakefile.toml"
+    if not lakefile.exists() and not (project_path / "lakefile.lean").exists():
+        try:
+            lakefile.write_text('[package]\nname = "' + project_path.name + '"\nversion = "0.1.0"\n\n[dependencies]\nmathlib = { git = "https://github.com/leanprover-community/mathlib4.git" }\n')
+        except Exception as e:
+            logger.warning("[autoformalize] lakefile 创建失败: %s", e)
+    logger.info("[autoformalize] %d .lean files", len(lean_files))
+    return {**state, "stage": "AUTOFORMALIZE"}
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# G2: Polish 节点
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def polish_node(state: ArchonState) -> ArchonState:
+    """G2: polish — 最终编译 + minimize_imports + G5 validate JSONL。"""
+    ws = state["workspace_path"]
+    if not ws or not Path(ws).exists():
+        return state
+    logger.info("[polish] 最终检查")
+    with sandbox_context(state.get("thread_id", "archon")) as sb:
+        ok, _ = build_project(ws, sb)
+        logger.info("[polish] lake build: %s", "PASS" if ok else "FAIL")
+        extra = ""
+        if ok:
+            # G5: validate milestones JSONL
+            journal = Path(ws) / ".archon-journal"
+            try:
+                for sd in sorted(journal.glob("session_*")):
+                    mf = sd / "milestones.jsonl"
+                    if mf.exists():
+                        import json as _json
+                        for line in mf.read_text().strip().split("\n"):
+                            if line.strip():
+                                _json.loads(line)
+                        logger.info("[polish] %s validated", sd.name)
+            except Exception as e:
+                logger.warning("[polish] validate: %s", e)
+            # minimize_imports
+            ms = Path(__file__).parent.parent.parent / "skills" / "custom" / "archon-lean4" / "scripts" / "minimize_imports.py"
+            if ms.exists():
+                exec_with_sandbox(f"python3 {ms} {ws}", ws, sb)
+            extra = "\n[polish] PASS"
+        else:
+            extra = "\n[polish] FAIL"
+    return {**state, "review": state.get("review", "") + extra}
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # 路由 + 图
 # ═══════════════════════════════════════════════════════════════════════
 
 
 def route(state: ArchonState) -> str:
-    return "review_agent" if state["stage"] != "COMPLETE" else END
+    stage = state["stage"]
+    if stage == "COMPLETE":
+        return "polish"
+    return "review_agent"
+
+
+def route_after_review(state: ArchonState) -> str:
+    if state["stage"] == "COMPLETE":
+        return END
+    return "planner"
 
 
 def build_archon_graph():
     w = StateGraph(ArchonState)
+    w.add_node("autoformalize", autoformalize_node)
     w.add_node("planner", planner)
     w.add_node("prover", prover)
     w.add_node("reviewer", reviewer)
+    w.add_node("polish", polish_node)
     w.add_node("review_agent", review_agent)
-    w.set_entry_point("planner")
+    w.set_entry_point("autoformalize")
+    w.add_edge("autoformalize", "planner")
     w.add_edge("planner", "prover")
     w.add_edge("prover", "reviewer")
-    w.add_conditional_edges("reviewer", route, {"review_agent": "review_agent", END: END})
-    w.add_edge("review_agent", "planner")
+    w.add_conditional_edges("reviewer", route, {"review_agent": "review_agent", "polish": "polish"})
+    w.add_edge("polish", "review_agent")
+    w.add_conditional_edges("review_agent", route_after_review, {"planner": "planner", END: END})
     return w.compile()
 
 

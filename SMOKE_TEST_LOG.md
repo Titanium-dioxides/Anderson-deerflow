@@ -4,6 +4,29 @@
 
 ---
 
+## 2026-05-19 22:32 — SystemMessage 修复 + PR4/S1/PR5/PR6 测试
+
+### 测试范围
+- [L0] 语法检查：shared.py, archon_graph.py, unified_graph.py, __init__.py
+- [L1] 函数存在性：22 shared.py 函数 + SystemMessage 导入
+- [L1] 核心纯函数单元测试：8 项
+- [L2] 新特性检查：_build_skill_prompt, feedback_tier, tier escalation, multi_path
+
+### 测试结果
+✅ PASS — 全部通过
+
+### 本次修复
+- archon_graph.py: 补充漏导入的 SystemMessage
+- unified_graph.py: 新增 _build_skill_prompt (PR4/S1), feedback_tier (PR5), multi_path (PR6)
+
+---
+
+## 2026-05-19 19:03 — 全面代码再检查 + 冒烟测试
+
+> 每次修改代码后必须执行局部冒烟测试。记录格式见 `SMOKE_TEST.md`。
+
+---
+
 ## 2026-05-19 19:03 — 全面代码再检查 + 冒烟测试
 
 ### 测试范围

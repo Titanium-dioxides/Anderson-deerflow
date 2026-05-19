@@ -2,6 +2,24 @@
 
 ## 2026-05-19
 
+### [pr456] PR4/S1 + PR5 + PR6: Rethlas 自适应技能 + 回环策略 + 多路探索
+- **文件:** `overlay/backend/workflows/unified_graph.py`
+- **PR4/S1:** 新增 `_build_skill_prompt(attempts, tier)` — 根据尝试次数和反馈级别动态构建 5 个技能提示
+  - Level 0: 获得直接结论
+  - Level 1+: 构造例子、尝试反例
+  - Level 2+: 子目标分解、识别关键失败
+- **PR5:** 新增 `feedback_tier: int` state 字段，reviewer_node 在编译失败时层级递进（0→1→2→3）
+  - Tier 1: 细化证明
+  - Tier 2: 子目标分解
+  - Tier 3: 重路由（替代证明路径）
+  - Build 通过时 tier 重置为 0
+- **PR6:** generator_node 在首次尝试时增加多 proof plan 探索提示
+- **测试:** 语法 + 函数存在性 + 特性检查 ✅
+
+### [import-fix] SystemMessage 导入修复
+- **文件:** `overlay/backend/workflows/archon_graph.py`
+- **修复:** 漏导入 `SystemMessage`（B5 分解和 planner LLM 调用中使用了但未 import）
+
 ### [audit-subagent] SubagentExecutor 替代 create_deerflow_agent
 - **文件:** `overlay/backend/workflows/archon_graph.py`, `overlay/backend/workflows/unified_graph.py`
 - **D1 修复:** prover 节点不再使用 `create_deerflow_agent().invoke()` 串行处理文件，改为 `SubagentExecutor` + `execute_async()` 每文件 spawn subagent

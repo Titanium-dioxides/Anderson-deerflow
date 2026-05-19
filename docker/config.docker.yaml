@@ -1,0 +1,81 @@
+# Archon-DeerFlow Docker Configuration
+# ======================================
+# Models, tools, sandbox for the archon-deerflow math proving system.
+
+# ── Chat Models ──
+models:
+  - name: deepseek-v4
+    display_name: DeepSeek Pro
+    use: langchain_deepseek:ChatDeepSeek
+    model: deepseek-chat
+    api_key: $DEEPSEEK_API_KEY
+    max_tokens: 65536
+    supports_thinking: false
+    supports_vision: false
+
+# ── Tools (configured in Python via get_available_tools()) ──
+tools:
+  - name: bash
+    use: deerflow.sandbox.tools:bash_tool
+    group: bash
+  - name: read_file
+    use: deerflow.sandbox.tools:read_file_tool
+    group: file
+  - name: write_file
+    use: deerflow.sandbox.tools:write_file_tool
+    group: file
+  - name: str_replace
+    use: deerflow.sandbox.tools:str_replace_tool
+    group: file
+  - name: ls
+    use: deerflow.sandbox.tools:ls_tool
+    group: file
+  - name: grep
+    use: deerflow.sandbox.tools:grep_tool
+    group: file
+  - name: glob
+    use: deerflow.sandbox.tools:glob_tool
+    group: file
+  - name: web_search
+    use: deerflow.community.tavily:web_search_tool
+    group: web
+  - name: web_fetch
+    use: deerflow.community.jina_ai:web_fetch_tool
+    group: web
+
+# ── Sandbox (Local execution) ──
+sandbox:
+  backend: local
+  use: deerflow.sandbox.local:LocalSandboxProvider
+
+# ── Persistence (SQLite for checkpoint resumption) ──
+persistence:
+  backend: sqlite
+  sqlite_dir: /app/backend/data
+
+# ── Checkpointer (SqliteSaver for cross-session persistence) ──
+# Configured via LangGraph's SqliteSaver inside the graph code itself.
+# The SQLite DB is at: /app/backend/data/checkpoints.db
+
+# ── Subagents ──
+subagents:
+  custom_agents: []
+
+# ── Memory ──
+memory:
+  enabled: false
+  backend: memory
+
+# ── Summarization ──
+summarization:
+  enabled: false
+
+# ── Loop Detection ──
+loop_detection:
+  enabled: true
+  max_repeats: 5
+
+# ── Skills ──
+skills:
+  container_path: /app/skills
+  get_skills_path: /app/skills

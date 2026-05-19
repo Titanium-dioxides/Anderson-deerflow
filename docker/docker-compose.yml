@@ -1,0 +1,78 @@
+# ==============================================================================
+# Archon-DeerFlow — Docker Compose (Production)
+# ==============================================================================
+# Services:
+#   - gateway: FastAPI Gateway + LangGraph agent runtime + Lean 4 + SqliteSaver
+#   - nginx:   Reverse proxy (optional, port 2026)
+#
+# Usage:
+#   1. Set DEEPSEEK_API_KEY in .env
+#   2. docker-compose up -d
+#   3. Access: http://localhost:8001
+#
+# Environment variables (set in .env or export before docker-compose):
+#   DEEPSEEK_API_KEY     — DeepSeek API key
+#   PORT                 — External port (default 8001)
+# ==============================================================================
+
+services:
+  # ── Gateway (single-container: all-in-one) ────────────────────────────
+  gateway:
+    build:
+      context: ../
+      dockerfile: docker/Dockerfile
+    image: archon-deerflow:latest
+    container_name: archon-deerflow-gateway
+    ports:
+      - "${PORT:-8001}:8001"
+    volumes:
+      # Persistent data (checkpoints DB, thread data, journals)
+      - archon-data:/app/backend/data
+      - archon-deerflow:/app/backend/.deer-flow
+      # Mount config files (read-only)
+      - ../config.yaml:/app/config.yaml:ro
+      - ../extensions_config.json:/app/extensions_config.json:ro
+      # Mount Lean project workspace
+      - ${WORKSPACE_PATH:-./workspace}:/app/workspace
+      # Skills
+      - ../skills:/app/skills:ro
+      # Overlay (workflows)
+      - ../overlay:/app/overlay:ro
+    environment:
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
+      - DEER_FLOW_PROJECT_ROOT=/app
+      - DEER_FLOW_HOME=/app/backend/.deer-flow
+      - DEER_FLOW_CONFIG_PATH=/app/config.yaml
+      - DEER_FLOW_EXTENSIONS_CONFIG_PATH=/app/extensions_config.json
+      - DEER_FLOW_CHANNELS_LANGGRAPH_URL=http://localhost:8001/api
+      - DEER_FLOW_CHANNELS_GATEWAY_URL=http://localhost:8001
+      - LANG=C.UTF-8
+      - LC_ALL=C.UTF-8
+      - PYTHONIOENCODING=utf-8
+    env_file:
+      - ../.env
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/api/models"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # ── Nginx Reverse Proxy (optional) ─────────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    container_name: archon-deerflow-nginx
+    ports:
+      - "${NGINX_PORT:-2026}:2026"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - gateway
+    restart: unless-stopped
+    profiles:
+      - full
+
+volumes:
+  archon-data:
+  archon-deerflow:

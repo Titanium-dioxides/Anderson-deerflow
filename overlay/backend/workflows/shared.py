@@ -347,6 +347,24 @@ def extract_goal(lines: list[str], target_line: int) -> dict:
 # ═══════════════════════════════════════════════════════════════════════
 
 
+def get_checkpointer():
+    '''G7: 自动检测 SqliteSaver 或回退 MemorySaver。
+    Docker 环境（DEER_FLOW_DOCKER=1）使用 SqliteSaver 持久化到 SQLite。
+    否则使用 MemorySaver（进程内检查点）。
+    '''
+    db_path = os.environ.get("CHECKPOINT_DB_PATH", "backend/data/checkpoints.db")
+    if os.environ.get("DEER_FLOW_DOCKER"):
+        try:
+            from langgraph.checkpoint.sqlite import SqliteSaver
+            logger.info("[checkpoint] Using SqliteSaver: %s", db_path)
+            return SqliteSaver.from_conn_string(db_path)
+        except ImportError:
+            logger.warning("[checkpoint] SqliteSaver not available, fallback MemorySaver")
+    from langgraph.checkpoint.memory import MemorySaver
+    logger.info("[checkpoint] Using MemorySaver (in-memory)")
+    return MemorySaver()
+
+
 AUTO_TACTICS = ["rfl", "simp", "ring", "linarith", "omega", "aesop", "grind"]
 
 # G11: 扩展 tactics（exact?/apply? — 可能超时，默认不启用）

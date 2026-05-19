@@ -1,0 +1,41 @@
+# ==============================================================================
+# Archon-DeerFlow — Docker Compose (Development)
+# ==============================================================================
+# Hot-reload enabled, source code mounted.
+#
+# Usage:
+#   docker-compose -f docker/docker-compose.dev.yml up --build
+# ==============================================================================
+
+services:
+  gateway:
+    build:
+      context: ../
+      dockerfile: docker/Dockerfile
+    container_name: archon-dev-gateway
+    ports:
+      - "8001:8001"
+    volumes:
+      - archon-dev-data:/app/backend/data
+      - ../config.yaml:/app/config.yaml:ro
+      - ../extensions_config.json:/app/extensions_config.json:ro
+      - ../overlay:/app/overlay
+      - ../skills:/app/skills:ro
+      - ../tests:/app/tests
+    environment:
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
+      - DEER_FLOW_PROJECT_ROOT=/app
+      - DEER_FLOW_HOME=/app/backend/.deer-flow
+      - DEER_FLOW_CONFIG_PATH=/app/config.yaml
+      - DEER_FLOW_EXTENSIONS_CONFIG_PATH=/app/extensions_config.json
+      - LANG=C.UTF-8
+      - LC_ALL=C.UTF-8
+    command: |
+      sh -c "
+      cd /app &&
+      mkdir -p backend/.deer-flow backend/data &&
+      uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --reload
+      "
+
+volumes:
+  archon-dev-data:

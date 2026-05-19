@@ -35,6 +35,7 @@ from .shared import (  # E1: 从共享模块导入
     scan_sorries, count_sorries, build_project, verify_file,
     try_tactics_cascade, try_tactics_cascade_all,
     get_model_name, make_model,
+    search_matlas,
 )
 
 logger = logging.getLogger(__name__)
@@ -181,30 +182,53 @@ def _build_skill_prompt(attempts: int, tier: int) -> str:
 
 
 def search_node(state: UnifiedState) -> UnifiedState:
+    """G6: 搜索 — Matlas 优先（8M 语句），leansearch.net 回退。"""
     state = dict(state)
     statement = state["statement"]
-    logger.info("[search] 搜索相关定理: %s", statement[:80])
+    logger.info("[search] 搜索: %s", statement[:80])
+
+    results = []
+    # 优先 Matlas (8.07M statements from peer-reviewed papers)
     try:
-        import ssl, urllib.request
-        ctx = ssl.create_default_context()
-        req = urllib.request.Request(
-            _SEARCH_URL,
-            data=json.dumps({"query": statement, "task": "retrieve useful theorems", "num_results": 5}).encode(),
-            headers={"Content-Type": "application/json"},
-        )
-        with urllib.request.urlopen(req, context=ctx, timeout=10) as resp:
-            results = json.loads(resp.read().decode()) if resp.readable() else []
+        results = search_matlas(statement, max_results=10)
+        if results:
+            logger.info("[search] Matlas: %d results", len(results))
     except Exception as e:
-        logger.warning("[search] 远程搜索失败: %s", e)
-        results = []
+        logger.warning("[search] Matlas 失败: %s", e)
+
+    # 回退 leansearch.net (mathlib-only)
+    if not results:
+        try:
+            import ssl, urllib.request
+            ctx = ssl.create_default_context()
+            req = urllib.request.Request(
+                _SEARCH_URL,
+                data=json.dumps({"query": statement, "task": "retrieve useful theorems", "num_results": 5}).encode(),
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, context=ctx, timeout=10) as resp:
+                results = json.loads(resp.read().decode()) if resp.readable() else []
+            if results:
+                logger.info("[search] leansearch: %d results", len(results))
+        except Exception as e:
+            logger.warning("[search] leansearch 失败: %s", e)
 
     search_context = ""
     if results:
-        lines = ["## 相关定理"]
-        for r in results[:5]:
-            thm = r.get("theorem", "") or r.get("title", "")
-            if thm and len(thm) < 500:
-                lines.append(f"- {thm}")
+        lines = ["## 相关定理（Matlas/leansearch）"]
+        for r in results[:8]:
+            stmt = r.get("statement", "") or r.get("theorem", "") or r.get("title", "")
+            src = r.get("entity_name", "") or ""
+            journal = r.get("journal", "") or ""
+            year = r.get("year", "") or ""
+            do = r.get("doi", "") or ""
+            entry = f"- {src}: {stmt}" if src else f"- {stmt}"
+            if journal and year:
+                entry += f" ({journal}, {year})"
+            if do:
+                entry += f" [{do}]"
+            if len(entry) < 600:
+                lines.append(entry)
         search_context = "\n".join(lines)
 
     state["messages"].append(HumanMessage(

@@ -352,6 +352,31 @@ AUTO_TACTICS = ["rfl", "simp", "ring", "linarith", "omega", "aesop", "grind"]
 # G11: 扩展 tactics（exact?/apply? — 可能超时，默认不启用）
 AUTO_TACTICS_EXTENDED = ["rfl", "simp", "ring", "linarith", "omega", "aesop", "grind", "exact?", "apply?"]
 USE_EXTENDED_TACTICS = False  # 设为 True 启用 exact?/apply?
+def search_matlas(query: str, max_results: int = 10) -> list[dict]:
+    '''G6: Matlas API — semantic search over 8.07M mathematical statements.
+    POST https://matlas.ai/api/search
+    Falls back to leansearch.net on failure.
+    '''
+    if max_results < 10:
+        max_results = 10  # API requires >= 10
+    try:
+        import ssl, urllib.request
+        ctx = ssl.create_default_context()
+        req = urllib.request.Request(
+            "https://matlas.ai/api/search",
+            data=json.dumps({"query": query, "num_results": max_results}).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, context=ctx, timeout=15) as resp:
+            data = json.loads(resp.read().decode())
+            if isinstance(data, list) and data:
+                logger.info("[matlas] %d results for: %s", len(data), query[:80])
+                return data
+    except Exception as e:
+        logger.warning("[matlas] API 不可用: %s", e)
+    return []
+
+
 
 
 # ═══════════════════════════════════════════════════════════════════════

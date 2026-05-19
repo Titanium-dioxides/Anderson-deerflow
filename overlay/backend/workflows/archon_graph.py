@@ -34,6 +34,7 @@ from .shared import (  # E1: 所有共享函数从 shared.py 导入
     scan_sorries, count_sorries, build_project, verify_file,
     try_tactics_cascade, try_tactics_cascade_all,
     get_model_name, make_model,
+    search_matlas,
 )
 
 logger = logging.getLogger(__name__)

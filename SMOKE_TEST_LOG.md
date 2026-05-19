@@ -4,6 +4,34 @@
 
 ---
 
+## 2026-05-19 19:03 — 全面代码再检查 + 冒烟测试
+
+### 测试范围
+- [L0] 语法检查：shared.py, archon_graph.py, unified_graph.py, __init__.py
+- [L1] 导入一致性：shared.py 导出函数是否被 graph 文件正确引用
+- [L1] 死代码检查：未调用的函数
+- [L1] 模式检查：state=dict(state) 使用位置、bare except
+- [L2] shared.py 纯函数测试：Phase 1-6 共 60 项测试
+- [L2] graph 构建检查：节点数、entry point、路由正确性
+- [L2] 状态字段一致性：使用的字段是否在 TypedDict 中定义
+- [L2] stage 值有效性
+- [L2] SubagentConfig 完整性
+- [L2] B5 B6 PR2 PR3 特性存在性
+- [L3] SystemMessage 导入完整性
+- [L3] 深度代码审查（无实质问题）
+
+### 测试结果
+✅ PASS — 60/60 (shared.py 纯函数测试)
+✅ PASS — 38/38 (graph 构建 + 路由 + 特性检查)
+
+### 发现并修复的问题
+- ❌ archon_graph.py: 使用 SystemMessage 但未导入 → ✅ 已修复
+
+### 记录的已知问题（不需立即修复）
+- ⚠️ unified_graph.py: 6 处 state=dict(state) 用于内部可变操作（AUDIT_V2 维度1 已记录，可接受的 tradeoff）
+
+---
+
 ## 2026-05-14 20:22 — 8c07159
 
 ### 测试范围

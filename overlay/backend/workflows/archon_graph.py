@@ -15,7 +15,7 @@ from typing import Annotated, Literal, TypedDict
 
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from deerflow.subagents import SubagentConfig, SubagentExecutor
 from deerflow.subagents.executor import (

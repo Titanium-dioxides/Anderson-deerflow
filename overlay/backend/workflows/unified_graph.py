@@ -298,10 +298,23 @@ def generator_node(state: UnifiedState) -> UnifiedState:
 
 
 def verifier_node(state: UnifiedState) -> UnifiedState:
+    """G9: 增强验证 — 结构化检查 critical_errors + gaps。"""
     state = dict(state)
     proof = state.get("informal_proof", "")
 
     ver_prompt = _read_prompt(_VER_PROMPT)
+    if not ver_prompt:
+        ver_prompt = (
+            "你是数学证明验证 Agent。检查以下证明的正确性。\n\n"
+            "## 验证流程\n"
+            "1. 逐语句检查逻辑推理的有效性\n"
+            "2. 检查定理引用的正确性\n"
+            "3. 检查外部引用的准确性\n"
+            "4. 检查缺失的假设和未证明的跳步\n\n"
+            "## 输出 JSON\n"
+            '{"verification_report":{"summary":"...","critical_errors":[],"gaps":[]},"verdict":"correct|wrong","repair_hints":"..."}\n'
+        )
+
     resp = make_model().invoke([
         SystemMessage(content=ver_prompt),
         HumanMessage(content=f"## 命题\n{state['statement']}\n\n## 待验证证明\n{proof}"),

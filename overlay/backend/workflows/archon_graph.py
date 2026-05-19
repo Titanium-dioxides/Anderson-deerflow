@@ -34,7 +34,7 @@ from .shared import (  # E1: 所有共享函数从 shared.py 导入
     scan_sorries, count_sorries, build_project, verify_file,
     try_tactics_cascade, try_tactics_cascade_all,
     get_model_name, make_model,
-    search_matlas,
+    search_matlas, save_memory, load_memory,
 )
 
 logger = logging.getLogger(__name__)
@@ -196,6 +196,14 @@ def planner(state: ArchonState) -> ArchonState:
         failure_modes[fn] = list(modes)
         if modes:
             logger.info("[plan] %s: 失败模式 %s", fn, modes)
+
+    # G7: 加载持久化记忆
+    mem = load_memory(ws)
+    if mem:
+        state["attempt_history"] = mem.get("attempt_history", []) + state.get("attempt_history", [])
+        if not state.get("failure_modes"):
+            state["failure_modes"] = mem.get("failure_modes", {})
+        logger.info("[plan] 从 memory.json 恢复 %d attempts", len(mem.get("attempt_history", [])))
 
     # P2: 读取 USER_HINTS.md
     user_hints = state.get("user_hints", "")
@@ -662,6 +670,9 @@ def review_agent(state: ArchonState) -> ArchonState:
                 hints_content.append(f"- {fn}: {', '.join(failure_modes.get(fn, []))}")
             hints_content.append("")
         user_hints_path.write_text("\n".join(hints_content))
+
+    # G7: 持久化记忆
+    save_memory(ws, state)
 
     logger.info("[review-agent] 期刊已写入 %s", session_dir)
     return state

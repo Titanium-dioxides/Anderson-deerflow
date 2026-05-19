@@ -375,6 +375,39 @@ def search_matlas(query: str, max_results: int = 10) -> list[dict]:
     except Exception as e:
         logger.warning("[matlas] API 不可用: %s", e)
     return []
+def save_memory(ws: str, state: dict) -> None:
+    '''G7: 持久化 attempt_history 和关键状态到 .archon-journal/memory.json。'''
+    import json as _json
+    journal = Path(ws) / ".archon-journal"
+    journal.mkdir(parents=True, exist_ok=True)
+    data = {
+        "attempt_history": state.get("attempt_history", []),
+        "failure_modes": state.get("failure_modes", {}),
+        "informal_hints": state.get("informal_hints", {}),
+        "stage": state.get("stage", ""),
+        "loop_count": state.get("loop_count", 0),
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+    with open(journal / "memory.json", "w") as f:
+        _json.dump(data, f, ensure_ascii=False, indent=2)
+    logger.info("[memory] saved %d attempts to memory.json", len(data["attempt_history"]))
+
+def load_memory(ws: str) -> dict:
+    '''G7: 从 .archon-journal/memory.json 加载持久化状态。'''
+    import json as _json
+    mem_path = Path(ws) / ".archon-journal" / "memory.json"
+    if not mem_path.exists():
+        return {}
+    try:
+        with open(mem_path) as f:
+            data = _json.load(f)
+        logger.info("[memory] loaded %d attempts from memory.json",
+                    len(data.get("attempt_history", [])))
+        return data
+    except Exception as e:
+        logger.warning("[memory] 加载失败: %s", e)
+        return {}
+
 
 
 

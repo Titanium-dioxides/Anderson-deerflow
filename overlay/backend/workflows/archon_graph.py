@@ -24,6 +24,8 @@ from deerflow.subagents.executor import (
     cleanup_background_task,
 )
 
+from .skill_tools import Rethlas_SKILL_TOOLS  # 自适应技能 tools
+
 from .shared import (  # E1: 所有共享函数从 shared.py 导入
     classify_error, parse_lean_errors, format_errors,
     extract_goal, classify_failure,
@@ -463,6 +465,8 @@ def prover(state: ArchonState) -> ArchonState:
     logger.info("[prove] 处理 %d 个文件 (SubagentExecutor)", len(pending))
 
     all_tools = get_available_tools(subagent_enabled=True)
+    # 附加 Rethlas 自适应技能 tools（LLM 在 agent 内动态选择）
+    all_tools = list(all_tools) + Rethlas_SKILL_TOOLS
     executor = SubagentExecutor(
         config=PROVER_SUBAGENT_CONFIG,
         tools=all_tools,

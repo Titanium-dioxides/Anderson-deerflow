@@ -25,6 +25,8 @@ from deerflow.subagents.executor import (
     cleanup_background_task,
 )
 
+from .skill_tools import Rethlas_SKILL_TOOLS  # 自适应技能 tools
+
 from .shared import (  # E1: 从共享模块导入
     classify_error, parse_lean_errors, format_errors,
     extract_goal, classify_failure,
@@ -761,6 +763,8 @@ def prover_node(state: UnifiedState) -> UnifiedState:
     logger.info("[prove-node] 处理 %d 个文件 (SubagentExecutor)", len(pending))
 
     all_tools = get_available_tools(subagent_enabled=True)
+    # 附加 Rethlas 自适应技能 tools（LLM 动态选择）
+    all_tools = list(all_tools) + Rethlas_SKILL_TOOLS
     executor = SubagentExecutor(config=UNIFIED_PROVER_CONFIG, tools=all_tools, thread_id=thread_id)
 
     completed = list(state.get("completed", []))

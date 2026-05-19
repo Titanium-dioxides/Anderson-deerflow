@@ -94,6 +94,7 @@ class UnifiedState(TypedDict):
     review: str
     archon_feedback: str
     archon_outer_cycles: int
+    feedback_tier: int  # PR5: 回环策略级别 (0=初始, 1=细化, 2=分解, 3=重路由)
     attempt_history: Annotated[list, _merge_attempts]
     failure_modes: Annotated[dict, _merge_failure_modes]
     informal_hints: dict[str, str]
@@ -118,6 +119,7 @@ def fresh_state(statement: str, ws: str = "", max_loops: int = 5) -> UnifiedStat
         "review": "",
         "archon_feedback": "",
         "archon_outer_cycles": 0,
+        "feedback_tier": 0,
         "attempt_history": [],
         "failure_modes": {},
         "informal_hints": {},
@@ -136,6 +138,43 @@ def _read_prompt(path: str) -> str:
 def _extract_proof(text: str) -> str:
     m = re.search(r'<proof>(.*?)</proof>', text, re.DOTALL)
     return m.group(1).strip() if m else text.strip()
+
+
+def _build_skill_prompt(attempts: int, tier: int) -> str:
+    """PR4/S1: 根据 proofs 尝试次数和反馈级别动态构建技能提示。"""
+    skills = [
+        "### 1. 获得直接结论\n从命题中直接导出最明显的推理和特例。"
+    ]
+    
+    if attempts >= 1:
+        skills.append(
+            "### 2. 构造例子\n"
+            "构造命题的具体例子，验证命题的合理性。"
+            "如果命题声称对所有对象成立，尝试几个不同类的例子。"
+        )
+    
+    if attempts >= 1:
+        skills.append(
+            "### 3. 尝试构造反例\n"
+            "尝试找到反例。如果在构造反例中遇到障碍，记录障碍点——"
+            "这通常揭示了证明的关键困难所在。"
+        )
+    
+    if attempts >= 2:
+        skills.append(
+            "### 4. 提出子目标分解方案\n"
+            "将主定理分解为 2-4 个更小更简单的子引理。"
+            "每个子引理应该独立可验证，且逻辑上支持主定理。"
+        )
+    
+    if attempts >= 2 and tier >= 2:
+        skills.append(
+            "### 5. 识别关键失败\n"
+            "回顾前几次失败。识别共同的失败模式：是类型构造错误？"
+            "还是缺少必要引理？还是策略方向的根本错误？据此调整方法。"
+        )
+    
+    return "\n".join(skills)
 
 
 # ── Rethlas 节点 ───────────────────────────────────────────────────────
@@ -175,17 +214,55 @@ def search_node(state: UnifiedState) -> UnifiedState:
 
 
 def generator_node(state: UnifiedState) -> UnifiedState:
+    """
+    PR4/S1: Rethlas 自适应技能选择 — 根据 rethlas_attempts 切换策略。
+    PR6: 多路并行提示 — 建议探索多个 proof plan。
+    PR5: 根据 feedback_tier 调整提示强度。
+    """
     state = dict(state)
     statement = state["statement"]
     rethlas_attempts = state.get("rethlas_attempts", 0)
     archon_feedback = state.get("archon_feedback", "")
+    tier = state.get("feedback_tier", 0)
 
     gen_prompt = _read_prompt(_GEN_PROMPT)
-    feedback = f"\n\n## 上次 Lean 编译错误（需修复证明中的错误）\n{archon_feedback}" if archon_feedback else ""
+
+    # PR4/S1: 自适应技能选择
+    skill_prompt = _build_skill_prompt(rethlas_attempts, tier)
+    
+    feedback = ""
+    if archon_feedback:
+        # PR5: 根据 tier 调整反馈强度
+        if tier == 1:
+            feedback = (
+                f"\n\n## 上次 Lean 编译错误\n{archon_feedback[:3000]}\n"
+                f"\n**策略: 细化证明** — 请提供更详细的证明步骤，特别是 Lean 编译器报错的局部。"
+            )
+        elif tier == 2:
+            feedback = (
+                f"\n\n## 上次 Lean 编译错误\n{archon_feedback[:3000]}\n"
+                f"\n**策略: 分解** — 请将证明拆分为更小的子引理。"
+                f"每个子引理应该独立可验证。输出形式: `## 引理 1\n### 陈述\n...\n### 证明\n...`"
+            )
+        else:
+            feedback = (
+                f"\n\n## 上次 Lean 编译错误\n{archon_feedback[:3000]}\n"
+                f"\n**策略: 重路由** — 请尝试完全不同的证明方法。"
+                f"避免使用之前失败的方法。探索替代的数学构造。"
+            )
+
+    # PR6: 多路并行提示
+    multi_path = ""
+    if rethlas_attempts <= 1:
+        multi_path = (
+            "\n## 探索策略\n"
+            "考虑 2-3 个不同的证明方向（如：代数方向、拓扑方向、组合方向）。"
+            "对每个方向写一个简短的思路（1-2 句），然后选择最有希望的方向完整展开。"
+        )
 
     resp = make_model().invoke([
-        SystemMessage(content=gen_prompt),
-        HumanMessage(content=f"## 命题\n{statement}\n{feedback}\n\n请生成证明。"),
+        SystemMessage(content=gen_prompt + "\n\n" + skill_prompt),
+        HumanMessage(content=f"## 命题\n{statement}\n{feedback}{multi_path}\n\n请生成证明。"),
     ])
     proof = _extract_proof(str(resp.content))
     logger.info("[generate] 生成了 %d 字符证明", len(proof))
@@ -655,6 +732,7 @@ def prover_node(state: UnifiedState) -> UnifiedState:
 
 
 def reviewer_node(state: UnifiedState) -> UnifiedState:
+    """PR5: 回环策略层级递进 — 跟踪 feedback_tier 实现 detail→decompose→reroute。"""
     ws = state["workspace_path"]
 
     with sandbox_context(state.get("thread_id", "unified")) as sb:
@@ -669,17 +747,34 @@ def reviewer_node(state: UnifiedState) -> UnifiedState:
     logger.info("[review-node] %s", review)
 
     stage = state["stage"]
+    tier = state.get("feedback_tier", 0)
+    archon_feedback = state.get("archon_feedback", "")
+    outer_cycles = state.get("archon_outer_cycles", 0)
+
     if ok and n == 0:
         stage = "COMPLETE"
+        tier = 0
     elif state["loop_count"] >= state["max_loops"]:
         stage = "COMPLETE"
 
-    archon_feedback = state.get("archon_feedback", "")
+    # PR5: 当编译失败时层级递进
     if not ok and n > 0:
         archon_feedback = log[-2000:] if len(log) > 2000 else log
         stage = "RETHLAS"
+        outer_cycles += 1
+        tier = min(tier + 1, 3)  # max tier = 3
+        logger.info("[review-node] 回环策略 tier=%d (cycle #%d): %s",
+                    tier, outer_cycles,
+                    {0: "初始", 1: "细化证明", 2: "子目标分解", 3: "重路由"}.get(tier, "?"))
 
-    return {**state, "review": review, "stage": stage, "archon_feedback": archon_feedback}
+    return {
+        **state,
+        "review": review + f" [tier={tier}]",
+        "stage": stage,
+        "archon_feedback": archon_feedback,
+        "archon_outer_cycles": outer_cycles,
+        "feedback_tier": tier,
+    }
 
 
 def review_agent_node(state: UnifiedState) -> UnifiedState:

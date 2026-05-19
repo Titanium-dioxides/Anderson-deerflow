@@ -179,9 +179,9 @@
 | PR1 | unified_graph planner_node 未调 LLM（与 archon_graph 不一致）| P2/P3 | ✅ 2026-05-19 |
 | PR2 | autoformalize 独立阶段缺失 | P3 | ✅ 2026-05-19 |
 | PR3 | polish 独立阶段缺失 | P3 | ✅ 2026-05-19 |
-| PR4 | Rethlas 10 自适应 Skills 未移植 | P3/P4 | 🟡 |
-| PR5 | 回环策略三级递进未独立实现 | P3 | 🟡 |
-| PR6 | Rethlas 多路并行探索（单路径线性）| P4 | 🟡 |
+| PR4 | Rethlas 10 自适应 Skills 未移植 | P3/P4 | ✅ 2026-05-19 _build_skill_prompt |
+| PR5 | 回环策略三级递进未独立实现 | P3 | ✅ 2026-05-19 feedback_tier 级联 |
+| PR6 | Rethlas 多路并行探索（单路径线性）| P4 | ✅ 2026-05-19 multi_path 提示 |
 | PR7 | Principle.md 引用已改为 AUDIT_V2.md | — | ✅ 2026-05-19 |
 
 ## 修复记录

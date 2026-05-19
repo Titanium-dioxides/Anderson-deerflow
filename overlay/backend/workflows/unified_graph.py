@@ -594,10 +594,23 @@ def planner_node(state: UnifiedState) -> UnifiedState:
 # ── D1: Subagent 配置 ──────────────────────────────────────────────────
 
 
+def _build_prover_prompt() -> str:
+    """P1: 优先 apply_prompt_template，回退手动 prompt。"""
+    try:
+        from deerflow.agents.lead_agent.prompt import apply_prompt_template
+        return apply_prompt_template(
+            subagent_enabled=False,
+            available_skills=set(["archon-lean4"]),
+        )
+    except Exception:
+        pass
+    return ""
+
+
 UNIFIED_PROVER_CONFIG = SubagentConfig(
     name="unified-prover",
     description="填充 Lean 文件中的 sorry 并编译验证",
-    system_prompt="你是 Lean4 形式化证明助手。\n\n"
+    system_prompt=_build_prover_prompt() or "你是 Lean4 形式化证明助手。\n\n"
         "你的任务是：\n"
         "1. 用 `read_file` 读取文件内容\n"
         "2. 用 `lean_goal` 获取编译时目标状态\n"

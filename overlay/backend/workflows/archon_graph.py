@@ -92,9 +92,13 @@ class ArchonState(TypedDict):
     previous_strategies: dict[str, list]
     user_hints: str
     thread_id: str
+    # 1.4/1.5: 运行模式控制
+    parallel: bool     # True=并行prover(默认), False=串行prover
+    dry_run: bool      # True=只打印prompt不调LLM, False=正常执行(默认)
 
 
-def fresh_state(ws: str, max_loops: int = 5, thread_id: str | None = None) -> ArchonState:
+def fresh_state(ws: str, max_loops: int = 5, thread_id: str | None = None,
+               parallel: bool = True, dry_run: bool = False) -> ArchonState:
     return {
         "messages": [],
         "workspace_path": ws,
@@ -110,6 +114,8 @@ def fresh_state(ws: str, max_loops: int = 5, thread_id: str | None = None) -> Ar
         "previous_strategies": {},
         "user_hints": "",
         "thread_id": thread_id or f"archon-{Path(ws).name}",
+        "parallel": parallel,
+        "dry_run": dry_run,
     }
 
 
@@ -173,7 +179,8 @@ def planner(state: ArchonState) -> ArchonState:
     """
     ws = state["workspace_path"]
     loop = state.get("loop_count", 0) + 1
-    logger.info("[plan] === loop #%d ===", loop)
+    dry_run = state.get("dry_run", False)
+    logger.info("[plan] === loop #%d ===%s", loop, " (DRY-RUN)" if dry_run else "")
 
     with sandbox_context(state.get("thread_id", "archon")) as sb:
         sorries = scan_sorries(ws, sb)
@@ -294,11 +301,15 @@ def planner(state: ArchonState) -> ArchonState:
                     f"确保辅助引理顺序依赖正确。"
                 )
                 try:
-                    resp = make_model().invoke([
-                        SystemMessage(content="你是 Lean4 形式化专家。将复杂定理分解为子引理。"),
-                        HumanMessage(content=decompose_prompt),
-                    ])
-                    sub_lemmas = extract_code(str(resp.content))
+                    if dry_run:
+                        logger.info("[plan] DRY-RUN B5: 分解 %s (goal: %s)", fn, goal_sig[:60])
+                        sub_lemmas = ""
+                    else:
+                        resp = make_model().invoke([
+                            SystemMessage(content="你是 Lean4 形式化专家。将复杂定理分解为子引理。"),
+                            HumanMessage(content=decompose_prompt),
+                        ])
+                        sub_lemmas = extract_code(str(resp.content))
                     if sub_lemmas and len(sub_lemmas) > 100:
                         insert_pos = max(0, target_line - 1)
                         all_lines = (lines[:insert_pos]
@@ -311,11 +322,15 @@ def planner(state: ArchonState) -> ArchonState:
                     logger.warning("[plan] B5: %s 分解失败: %s", fn, e)
 
         try:
-            resp = make_model().invoke([
-                SystemMessage(content="你是 Archon Plan Agent。分析证明状态，提供指引。"),
-                HumanMessage(content="\n".join(plan_prompt_lines)),
-            ])
-            plan_text = str(resp.content)
+            if dry_run:
+                logger.info("[plan] DRY-RUN: 跳过 planner LLM 调用 (%d files)", len(sorries))
+                plan_text = ""
+            else:
+                resp = make_model().invoke([
+                    SystemMessage(content="你是 Archon Plan Agent。分析证明状态，提供指引。"),
+                    HumanMessage(content="\n".join(plan_prompt_lines)),
+                ])
+                plan_text = str(resp.content)
 
             for line in plan_text.split("\n"):
                 if "|" in line:
@@ -453,17 +468,29 @@ def _collect_subagent_result(task_id: str, t: dict, state: ArchonState,
 
 
 def prover(state: ArchonState) -> ArchonState:
-    """D1: 使用 SubagentExecutor 为每个文件 spawn subagent。"""
+    """D1: 使用 SubagentExecutor 为每个文件 spawn subagent。
+    
+    1.4: 支持 parallel=False 串行模式
+    1.5: dry_run=True 时跳过 LLM 调用
+    """
     from deerflow.tools import get_available_tools
 
     ws = state["workspace_path"]
     pending = state.get("pending", [])
     thread_id = state.get("thread_id", "archon")
+    dry_run = state.get("dry_run", False)
+    parallel = state.get("parallel", True)
 
     if not pending:
         return state
 
-    logger.info("[prove] 处理 %d 个文件 (SubagentExecutor)", len(pending))
+    if dry_run:
+        logger.info("[prove] DRY-RUN: 跳过 %d 个文件的 LLM 证明", len(pending))
+        for t in pending:
+            logger.info("[prove] DRY-RUN target: %s:%s", t.get("file", "?"), t.get("line", "?"))
+        return state
+
+    logger.info("[prove] 处理 %d 个文件 (mode=%s)", len(pending), "parallel" if parallel else "serial")
 
     all_tools = get_available_tools(subagent_enabled=True)
     executor = SubagentExecutor(
@@ -472,7 +499,6 @@ def prover(state: ArchonState) -> ArchonState:
         thread_id=thread_id,
     )
 
-    # 收集已完成的文件（自动化策略）
     completed = list(state.get("completed", []))
     new_attempts = list(state.get("attempt_history", []))
     task_ids = []
@@ -483,12 +509,16 @@ def prover(state: ArchonState) -> ArchonState:
             continue
         tid = _spawn_prove_subagent(executor, t, state)
         if tid:
-            task_ids.append((tid, t))
+            if not parallel:
+                # 串行: 不等全部 spawn，立即收集结果
+                _collect_subagent_result(tid, t, state)
+            else:
+                task_ids.append((tid, t))
 
-    for tid, t in task_ids:
-        _collect_subagent_result(tid, t, state)
+    if parallel:
+        for tid, t in task_ids:
+            _collect_subagent_result(tid, t, state)
 
-    # 重新读取 state 以获取被子函数修改的字段
     done = set(state.get("completed", [])) | set(completed)
     new_pending = [t for t in pending if t["file"] not in done]
     logger.info("[prove] 本轮: %d 完成, %d 剩余", len(done), len(new_pending))
@@ -781,8 +811,8 @@ def build_archon_graph():
     return w.compile(checkpointer=get_checkpointer())
 
 
-def run_archon_workflow(ws: str, max_loops: int = 5) -> dict:
+def run_archon_workflow(ws: str, max_loops: int = 5, parallel: bool = True, dry_run: bool = False) -> dict:
     return build_archon_graph().invoke(
-        fresh_state(ws, max_loops),
+        fresh_state(ws, max_loops, parallel=parallel, dry_run=dry_run),
         {"configurable": {"thread_id": f"archon-{Path(ws).name}"}},
     )

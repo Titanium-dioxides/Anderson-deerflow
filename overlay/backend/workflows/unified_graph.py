@@ -110,9 +110,13 @@ class UnifiedState(TypedDict):
     failure_modes: Annotated[dict, _merge_failure_modes]
     informal_hints: dict[str, str]
     previous_strategies: dict[str, list]
+    # 1.4/1.5: 运行模式控制
+    parallel: bool
+    dry_run: bool
 
 
-def fresh_state(statement: str, ws: str = "", max_loops: int = 5) -> UnifiedState:
+def fresh_state(statement: str, ws: str = "", max_loops: int = 5,
+               parallel: bool = True, dry_run: bool = False) -> UnifiedState:
     return {
         "messages": [],
         "statement": statement,
@@ -135,6 +139,8 @@ def fresh_state(statement: str, ws: str = "", max_loops: int = 5) -> UnifiedStat
         "failure_modes": {},
         "informal_hints": {},
         "previous_strategies": {},
+        "parallel": parallel,
+        "dry_run": dry_run,
     }
 
 
@@ -320,6 +326,7 @@ def rethlas_agent_node(state: UnifiedState) -> UnifiedState:
     state = dict(state)
     statement = state["statement"]
     rethlas_attempts = state.get("rethlas_attempts", 0)
+    dry_run = state.get("dry_run", False)
 
     if rethlas_attempts >= 3:
         logger.info("[rethlas-agent] 已达 3 次上限，停止")
@@ -328,6 +335,14 @@ def rethlas_agent_node(state: UnifiedState) -> UnifiedState:
         return state
 
     # 尝试使用 create_deerflow_agent()
+    if dry_run:
+        logger.info("[rethlas-agent] DRY-RUN: 跳过 LLM 调用")
+        logger.info("[rethlas-agent] System prompt (%d chars): %s...", len(system_prompt), system_prompt[:200])
+        state["informal_proof"] = "(dry-run)"
+        state["rethlas_attempts"] = rethlas_attempts + 1
+        state["archon_feedback"] = ""
+        return state
+
     try:
         from deerflow.agents.factory import create_deerflow_agent
         from deerflow.agents.features import RuntimeFeatures
@@ -1000,15 +1015,19 @@ def prover_node(state: UnifiedState) -> UnifiedState:
     ws = state["workspace_path"]
     pending = state.get("pending", [])
     thread_id = state.get("thread_id", "unified")
+    parallel = state.get("parallel", True)
+    dry_run = state.get("dry_run", False)
 
     if not pending:
         return state
 
-    logger.info("[prove-node] 处理 %d 个文件 (SubagentExecutor)", len(pending))
+    if dry_run:
+        logger.info("[prove-node] DRY-RUN: 跳过 %d 个文件", len(pending))
+        return state
+
+    logger.info("[prove-node] 处理 %d 个文件 (mode=%s)", len(pending), "parallel" if parallel else "serial")
 
     all_tools = get_available_tools(subagent_enabled=True)
-    # 注: Rethlas 自适应技能 tool 现在在 rethlas_agent_node 中使用,
-    # Archon prover 只需 LSP MCP tools
     executor = SubagentExecutor(config=UNIFIED_PROVER_CONFIG, tools=all_tools, thread_id=thread_id)
 
     completed = list(state.get("completed", []))
@@ -1019,10 +1038,14 @@ def prover_node(state: UnifiedState) -> UnifiedState:
             continue
         tid = _spawn_prove_subagent(executor, t, state)
         if tid:
-            task_ids.append((tid, t))
+            if not parallel:
+                _collect_prove_result(tid, t, state)
+            else:
+                task_ids.append((tid, t))
 
-    for tid, t in task_ids:
-        _collect_prove_result(tid, t, state)
+    if parallel:
+        for tid, t in task_ids:
+            _collect_prove_result(tid, t, state)
 
     done = set(state.get("completed", [])) | set(completed)
     new_pending = [t for t in pending if t["file"] not in done]
@@ -1295,8 +1318,9 @@ def build_unified_graph():
     return w.compile(checkpointer=get_checkpointer())
 
 
-def run_unified_workflow(statement: str, workspace_path: str = "", max_loops: int = 5) -> dict:
+def run_unified_workflow(statement: str, workspace_path: str = "", max_loops: int = 5,
+                         parallel: bool = True, dry_run: bool = False) -> dict:
     return build_unified_graph().invoke(
-        fresh_state(statement, workspace_path, max_loops),
+        fresh_state(statement, workspace_path, max_loops, parallel=parallel, dry_run=dry_run),
         {"configurable": {"thread_id": "unified-proof"}},
     )

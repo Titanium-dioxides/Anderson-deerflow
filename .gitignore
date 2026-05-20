@@ -5,3 +5,6 @@
 .DS_Store
 *.swp
 __pycache__/
+config.yaml
+extensions_config.json
+skills/custom/

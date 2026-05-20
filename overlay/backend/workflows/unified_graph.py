@@ -468,7 +468,14 @@ def failure_report_node(state: UnifiedState) -> UnifiedState:
 
 
 def autoformalize_node(state: UnifiedState) -> UnifiedState:
-    """PR2: autoformalize 阶段 — 将 Rethlas 非形式化证明转为 Lean 声明骨架。"""
+    """PR2: autoformalize 阶段 — 将 Rethlas 非形式化证明转为 Lean 声明骨架。
+    
+    原版 Archon 的三阶段之首：
+    1. 读取非形式化证明 → 识别引理结构
+    2. 按引理拆分为独立的 Lean 声明（含 sorry 占位）
+    3. 大证明拆分为多个 .lean 模块文件
+    4. 确保文件编译通过（sorries 在即可）
+    """
     state = dict(state)
     ws = state["workspace_path"]
     proof = state.get("informal_proof", "")
@@ -480,58 +487,152 @@ def autoformalize_node(state: UnifiedState) -> UnifiedState:
 
     project_path = Path(ws)
     if not project_path.exists():
-        logger.info("[autoformalize] 项目目录不存在，创建: %s", ws)
         project_path.mkdir(parents=True, exist_ok=True)
 
-    # 检查是否已有 .lean 文件
+    # 检查是否已有 .lean 文件（已 autoformalize 过）
     lean_files = list(project_path.glob("*.lean")) + list(project_path.glob("**/*.lean"))
     lean_files = [f for f in lean_files if '.lake' not in str(f)]
 
-    if lean_files:
-        logger.info("[autoformalize] 已有 %d 个 .lean 文件，跳过 autoformalize", len(lean_files))
+    if lean_files and proof:
+        # 已有文件但有新证明 → 追加（不覆盖）
+        logger.info("[autoformalize] 已有 %d 个 .lean 文件", len(lean_files))
         return {**state, "stage": "AUTOFORMALIZE"}
 
     if not proof:
         logger.warning("[autoformalize] 无非形式化证明，跳过")
         return {**state, "stage": "AUTOFORMALIZE"}
 
-    # 调用 LLM 生成 Lean 声明骨架
-    prompt = (
-        f"你是一个 Lean4 形式化专家。请将以下数学命题和证明翻译为 Lean 4 代码。\n"
-        f"输出格式：一个完整的 .lean 文件内容，包含正确的 imports 和声明。\n"
-        f"对于需要证明但尚未完成的部分，使用 `:= by\n  sorry` 占位。\n"
-        f"重点：确保类型签名准确，声明结构与 Mathlib 风格一致。\n"
-        f"\n## 命题\n{statement}\n"
-        f"\n## 非形式化证明\n{proof[:8000]}\n"
+    # Step 1: 分析非形式化证明中的引理结构
+    logger.info("[autoformalize] 分析引理结构...")
+    analysis_prompt = (
+        f"分析以下非形式化证明，列出其中所有的引理/子证明结构。\n\n"
+        f"## 命题\n{statement}\n\n"
+        f"## 证明\n{proof[:6000]}\n\n"
+        f"请输出 JSON 格式，列出：\n"
+        f'{{"lemmas": [{{"name": "建议的引理名", "statement": "引理陈述", '
+        f'"dependencies": ["依赖的其他引理名"], '
+        f'"is_main_theorem": false}}], '
+        f'"main_theorem": {{"name": "主定理名", "statement": "..."}}, '
+        f'"suggested_imports": ["Mathlib", "..."]}}'
     )
 
     try:
         resp = make_model().invoke([
-            SystemMessage(content="你是 Lean4 形式化专家。将数学命题翻译为 Lean 声明骨架。"),
-            HumanMessage(content=prompt),
+            SystemMessage(content="你是 Lean4 形式化专家。分析非形式化证明中的引理结构。"),
+            HumanMessage(content=analysis_prompt),
+        ])
+        structure = extract_json(str(resp.content))
+    except Exception as e:
+        logger.warning("[autoformalize] 引理分析失败: %s，使用单文件模式", e)
+        structure = {}
+
+    lemmas = structure.get("lemmas", [])
+    has_lemmas = len(lemmas) > 0
+    logger.info("[autoformalize] 检测到 %d 个引理", len(lemmas))
+
+    # Step 2: 生成 Lean 声明骨架
+    code_prompt = (
+        f"你是一个 Lean4 形式化专家。将以下数学命题和证明翻译为 Lean 4 代码。\n\n"
+        f"## 命题\n{statement}\n\n"
+    )
+
+    if has_lemmas:
+        code_prompt += (
+            f"## 引理结构\n以下引理需要在主定理之前声明，每个用 `:= by\n  sorry` 占位。\n"
+            f"引理应按依赖顺序排列（被依赖的在前）。\n\n"
+        )
+        for i, lem in enumerate(lemmas):
+            name = lem.get("name", f"lemma_{i+1}")
+            stmt = lem.get("statement", "")
+            deps = lem.get("dependencies", [])
+            code_prompt += f"### 引理: {name}\n{stmt}\n"
+            if deps:
+                code_prompt += f"依赖: {', '.join(deps)}\n"
+            code_prompt += "\n"
+
+    code_prompt += (
+        f"\n## 非形式化证明 (供参考)\n{proof[:6000]}\n\n"
+        f"## 输出要求\n"
+        f"1. 生成一个完整的 .lean 文件\n"
+        f"2. 包含正确的 imports（优先使用 Mathlib）\n"
+        f"3. 所有引理按依赖顺序排列\n"
+        f"4. 主定理在最后\n"
+        f"5. 每个证明体用 `:= by\n  sorry` 占位\n"
+        f"6. 类型签名准确，符合 Mathlib 风格\n"
+        f"7. 如果有多个独立模块（>200 行），用 `/- MODULE: name -/` 注释标记模块边界\n"
+    )
+
+    try:
+        resp = make_model().invoke([
+            SystemMessage(content="你是 Lean4 形式化专家。将数学命题翻译为声明骨架并保留引理结构。"),
+            HumanMessage(content=code_prompt),
         ])
         code = extract_code(str(resp.content))
-        if code:
-            # 写入主文件
-            main_file = project_path / "Main.lean"
-            main_file.write_text(code)
-            logger.info("[autoformalize] 写入 %s (%d 字符)", main_file, len(code))
-
-            # 尝试创建 lakefile 如果不存在
-            lakefile = project_path / "lakefile.toml"
-            if not lakefile.exists():
-                lakefile_text = (
-                    '[package]\n'
-                    'name = "' + project_path.name + '"\n'
-                    'version = "0.1.0"\n'
-                    '\n'
-                    '[dependencies]\n'
-                    'mathlib = { git = "https://github.com/leanprover-community/mathlib4.git" }\n'
-                )
-                lakefile.write_text(lakefile_text)
-                logger.info("[autoformalize] 创建 %s", lakefile)
     except Exception as e:
         logger.exception("[autoformalize] LLM 生成失败: %s", e)
+        return {**state, "stage": "AUTOFORMALIZE"}
+
+    if not code or len(code) < 50:
+        logger.warning("[autoformalize] 生成的代码过短或为空")
+        return {**state, "stage": "AUTOFORMALIZE"}
+
+    # Step 3: 按模块边界拆分
+    modules = []
+    module_pattern = re.compile(r'/\-\s*MODULE:\s*(.+?)\s*\-/')
+    parts = module_pattern.split(code)
+    if len(parts) > 1:
+        # 有显式 MODULE 标记
+        # parts[0] = 模块前的 imports/代码
+        for i in range(1, len(parts), 2):
+            module_name = parts[i].strip().replace(' ', '_')
+            module_body = parts[i + 1] if i + 1 < len(parts) else ""
+            modules.append((module_name, module_body))
+        logger.info("[autoformalize] 检测到 %d 个模块", len(modules))
+    else:
+        modules.append(("Main", code))
+
+    # Step 4: 写入文件
+    main_file = project_path / "Main.lean"
+    if len(modules) == 1:
+        main_name, main_code = modules[0]
+        main_file.write_text(main_code)
+        logger.info("[autoformalize] 写入 %s (%d 字符)", main_file, len(main_code))
+    else:
+        # 多模块: Main.lean import 其他模块
+        imports = [
+            f"import {project_path.name}.{name}"
+            for name, _ in modules if name != "Main"
+        ]
+        main_code = next((body for name, body in modules if name == "Main"), "")
+        if main_code:
+            main_file.write_text("\n".join(imports) + "\n\n" + main_code)
+        else:
+            main_file.write_text("\n".join(imports) + "\n\n")
+        logger.info("[autoformalize] 写入 %s (imports: %s)", main_file, imports)
+        
+        for mod_name, mod_code in modules:
+            if mod_name == "Main":
+                continue
+            mod_file = project_path / f"{mod_name}.lean"
+            mod_file.write_text(mod_code)
+            logger.info("[autoformalize] 写入 %s (%d 字符)", mod_file, len(mod_code))
+
+    # Step 5: 确保 lakefile 存在
+    lakefile = project_path / "lakefile.toml"
+    if not lakefile.exists():
+        lakefile_text = (
+            '[package]\n'
+            'name = "' + project_path.name + '"\n'
+            'version = "0.1.0"\n'
+            '\n'
+            '[[lean_lib]]\n'
+            'name = "' + project_path.name + '"\n'
+            '\n'
+            '[dependencies]\n'
+            'mathlib = { git = "https://github.com/leanprover-community/mathlib4.git" }\n'
+        )
+        lakefile.write_text(lakefile_text)
+        logger.info("[autoformalize] 创建 %s", lakefile)
 
     return {**state, "stage": "AUTOFORMALIZE"}
 
@@ -540,7 +641,15 @@ def autoformalize_node(state: UnifiedState) -> UnifiedState:
 
 
 def polish_node(state: UnifiedState) -> UnifiedState:
-    """PR3: Polish 阶段 — 最终检查、清理、refactor。"""
+    """PR3: Polish 阶段 — 最终检查、清理、golf、refactor。
+    
+    原版 Archon 的 Polish 阶段:
+    1. 确认 0 sorry + 编译通过
+    2. Golf 证明（精简冗余）
+    3. Refactor: 提取可复用 helper 到 Mathlib 风格
+    4. minimize_imports
+    5. 最终编译 + 里程碑验证
+    """
     state = dict(state)
     ws = state["workspace_path"]
     if not ws or not Path(ws).exists():

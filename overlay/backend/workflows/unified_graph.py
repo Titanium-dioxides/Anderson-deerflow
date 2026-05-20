@@ -1,7 +1,13 @@
 """
 Unified Math Prover — Rethlas 非形式化证明 → Archon(Lean) 验证
 ================================================================
-Rethlas: generate → verify → repair(≤3) → Archon: planner → prover → reviewer
+Rethlas: create_deerflow_agent() 自适应 agent loop (10 tools, ≤3 repair)
+Archon: planner → prover → reviewer
+
+改造 2026-05-20:
+- generator_node + verifier_node 固定 pipeline → rethlas_agent_node (create_deerflow_agent)
+- Rethlas_SKILL_TOOLS 从 5 个扩展到 10 个
+- recursive_proving_tool 支持多 proof plan 并行 subagent
 """
 
 import datetime
@@ -25,7 +31,7 @@ from deerflow.subagents.executor import (
     cleanup_background_task,
 )
 
-from .skill_tools import Rethlas_SKILL_TOOLS  # 自适应技能 tools
+from .skill_tools import Rethlas_SKILL_TOOLS  # 自适应技能 tools (现已 10 个)
 
 from .shared import (  # E1: 从共享模块导入
     classify_error, parse_lean_errors, format_errors,
@@ -181,6 +187,54 @@ def _build_skill_prompt(attempts: int, tier: int) -> str:
     return "\n".join(skills)
 
 
+# ── Rethlas 系统提示构建 ────────────────────────────────────────────
+
+
+def _build_rethlas_system_prompt(state: dict) -> str:
+    """构建 Rethlas 自适应 agent 的 system prompt。
+    
+    优先从 math-prover SKILL.md 加载，回退到内建 prompt。
+    注入当前 state 中的上下文（attempt history, feedback tier 等）。
+    """
+    skill_md = _read_prompt(str(_RETHLAS_DIR / "SKILL.md"))
+    if not skill_md:
+        skill_md = (
+            "# Rethlas 数学证明生成 Agent\n\n"
+            "## 自适应控制循环\n"
+            "1. **Assess**: 评估当前证明状态——已找到什么？卡在哪？\n"
+            "2. **Choose**: 从 10 个 skill 中选择最合适的\n"
+            "3. **Act**: 调用选定的 tool 执行\n"
+            "4. **Persist**: 记录结果\n"
+            "5. **Repeat**: 直到验证通过或所有路径耗尽\n"
+        )
+
+    # 注入重试计数和 tier 信息
+    attempts = state.get("rethlas_attempts", 0)
+    tier = state.get("feedback_tier", 0)
+    archon_feedback = state.get("archon_feedback", "")
+
+    context = f"\n\n## 当前状态\n- 尝试次数: {attempts}/3\n"
+    if attempts > 0:
+        past_verdicts = [
+            h.get("verdict", {}).get("verdict", "?")
+            for h in state.get("rethlas_history", [])
+        ]
+        context += f"- 历史裁决: {past_verdicts}\n"
+    if archon_feedback:
+        fb_short = archon_feedback[:500]
+        context += f"- Archon 反馈 (tier {tier}): {fb_short}\n"
+
+    tier_guidance = ""
+    if tier == 1:
+        tier_guidance = "\n**当前策略: 细化证明** — 提供更详细的步骤。"
+    elif tier == 2:
+        tier_guidance = "\n**当前策略: 子目标分解** — 将证明拆分为更小的引理。"
+    elif tier >= 3:
+        tier_guidance = "\n**当前策略: 重路由** — 尝试完全不同的证明方法。"
+
+    return skill_md + context + tier_guidance
+
+
 # ── Rethlas 节点 ───────────────────────────────────────────────────────
 
 
@@ -240,70 +294,126 @@ def search_node(state: UnifiedState) -> UnifiedState:
     return state
 
 
-def generator_node(state: UnifiedState) -> UnifiedState:
-    """
-    PR4/S1: Rethlas 自适应技能选择 — 根据 rethlas_attempts 切换策略。
-    PR6: 多路并行提示 — 建议探索多个 proof plan。
-    PR5: 根据 feedback_tier 调整提示强度。
+def rethlas_agent_node(state: UnifiedState) -> UnifiedState:
+    """🤖 自适应 Rethlas Agent — 使用 create_deerflow_agent() 替代固定 pipeline。
+    
+    原版 Rethlas 的自适应控制循环:
+    Assess → Choose skill → Act → Persist → Repeat
+    
+    现在由 DeerFlow 的 tool-calling agent loop 原生实现：
+    Model 收到 messages → 自主决定调用哪个 tool → tool 执行 → 结果返回 → 继续推理
+    
+    10 个 Rethlas skill 全部 bind 到 model，agent 自评估后动态选择。
+    ≤3 轮 repair 由 agent 自主管理（通过 verify_proof_tool 内部验证）。
     """
     state = dict(state)
     statement = state["statement"]
     rethlas_attempts = state.get("rethlas_attempts", 0)
-    archon_feedback = state.get("archon_feedback", "")
-    tier = state.get("feedback_tier", 0)
 
-    gen_prompt = _read_prompt(_GEN_PROMPT)
+    if rethlas_attempts >= 3:
+        logger.info("[rethlas-agent] 已达 3 次上限，停止")
+        state["rethlas_failed"] = True
+        state["stage"] = "RETHLAS"
+        return state
 
-    # PR4/S1: 自适应技能选择
-    skill_prompt = _build_skill_prompt(rethlas_attempts, tier)
+    # 尝试使用 create_deerflow_agent()
+    try:
+        from deerflow.agents.factory import create_deerflow_agent
+        from deerflow.agents.features import RuntimeFeatures
+        _HAS_AGENT_FACTORY = True
+    except ImportError:
+        _HAS_AGENT_FACTORY = False
+        logger.warning("[rethlas-agent] create_deerflow_agent 不可用，回退到 model.invoke()")
+
+    system_prompt = _build_rethlas_system_prompt(state)
     
-    feedback = ""
-    if archon_feedback:
-        # PR5: 根据 tier 调整反馈强度
-        if tier == 1:
-            feedback = (
-                f"\n\n## 上次 Lean 编译错误\n{archon_feedback[:3000]}\n"
-                f"\n**策略: 细化证明** — 请提供更详细的证明步骤，特别是 Lean 编译器报错的局部。"
-            )
-        elif tier == 2:
-            feedback = (
-                f"\n\n## 上次 Lean 编译错误\n{archon_feedback[:3000]}\n"
-                f"\n**策略: 分解** — 请将证明拆分为更小的子引理。"
-                f"每个子引理应该独立可验证。输出形式: `## 引理 1\n### 陈述\n...\n### 证明\n...`"
-            )
-        else:
-            feedback = (
-                f"\n\n## 上次 Lean 编译错误\n{archon_feedback[:3000]}\n"
-                f"\n**策略: 重路由** — 请尝试完全不同的证明方法。"
-                f"避免使用之前失败的方法。探索替代的数学构造。"
-            )
+    # 构建初始消息：注入搜索上下文 + 命题 + 生成指引
+    base_msg_content = (
+        f"## 目标命题\n{statement}\n\n"
+        f"请按照自适应控制循环执行证明任务。\n\n"
+        f"1. **Assess** 当前状态（搜索已提供相关定理）\n"
+        f"2. **Choose** 从 10 个 skill 中选择最合适的\n"
+        f"3. **Act** 调用 tool 执行\n"
+        f"4. **Persist** 记录进展\n"
+        f"5. **Repeat** 直到 verify_proof 通过或 3 次 attempt 用完\n\n"
+        f"你可以使用: search_mathematical_results, query_memory, "
+        f"obtain_immediate_conclusions, construct_examples, construct_counterexamples, "
+        f"propose_decomposition, direct_proving, recursive_proving, identify_key_failures, "
+        f"verify_proof.\n\n"
+        f"当你认为已经有了一个完整证明时，调用 verify_proof 验证。"
+    )
 
-    # PR6: 多路并行提示
-    multi_path = ""
-    if rethlas_attempts <= 1:
-        multi_path = (
-            "\n## 探索策略\n"
-            "考虑 2-3 个不同的证明方向（如：代数方向、拓扑方向、组合方向）。"
-            "对每个方向写一个简短的思路（1-2 句），然后选择最有希望的方向完整展开。"
-        )
+    if _HAS_AGENT_FACTORY:
+        try:
+            agent = create_deerflow_agent(
+                model=make_model(think=True),
+                tools=Rethlas_SKILL_TOOLS,
+                system_prompt=system_prompt,
+                features=RuntimeFeatures(
+                    sandbox=False,
+                    memory=False,
+                    loop_detection=True,
+                ),
+            )
+            result = agent.invoke(
+                {"messages": [HumanMessage(content=base_msg_content)]},
+                config={"configurable": {"thread_id": state.get("thread_id", "rethlas")}},
+            )
+            all_messages = result.get("messages", [])
+            logger.info("[rethlas-agent] Agent 完成, %d 条消息", len(all_messages))
+        except Exception as e:
+            logger.warning("[rethlas-agent] create_deerflow_agent 调用失败: %s, 回退", e)
+            _HAS_AGENT_FACTORY = False
 
-    resp = make_model().invoke([
-        SystemMessage(content=gen_prompt + "\n\n" + skill_prompt),
-        HumanMessage(content=f"## 命题\n{statement}\n{feedback}{multi_path}\n\n请生成证明。"),
-    ])
-    proof = _extract_proof(str(resp.content))
-    logger.info("[generate] 生成了 %d 字符证明", len(proof))
+    if not _HAS_AGENT_FACTORY:
+        # 回退：裸 model.invoke()
+        resp = make_model(think=True).invoke([
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=base_msg_content),
+        ])
+        all_messages = [resp]
+        logger.info("[rethlas-agent] 回退 model.invoke() 完成")
 
+    # 从 agent 输出中提取证明和 verdict
+    last_content = ""
+    if isinstance(all_messages, list) and all_messages:
+        last_msg = all_messages[-1]
+        if hasattr(last_msg, 'content'):
+            last_content = str(last_msg.content)
+    elif hasattr(all_messages, 'content'):
+        last_content = str(all_messages.content)
+    else:
+        last_content = str(all_messages)
+
+    proof = _extract_proof(last_content)
+    logger.info("[rethlas-agent] 提取到证明 (%d 字符)", len(proof))
+
+    # 更新 state
     state["informal_proof"] = proof
     state["rethlas_attempts"] = rethlas_attempts + 1
     state["archon_feedback"] = ""
+
     return state
 
 
 def verifier_node(state: UnifiedState) -> UnifiedState:
-    """G9: 增强验证 — 结构化检查 critical_errors + gaps。"""
+    """G9: 验证 — 检查 rethlas_agent_node 输出的证明。
+    
+    注：rethlas_agent_node 内部可以调用 verify_proof_tool 自行验证，
+    此节点作为最终 gate（主要在 Archon 反馈回路中使用）。
+    """
     state = dict(state)
     proof = state.get("informal_proof", "")
+
+    if not proof.strip():
+        state["rethlas_history"].append({
+            "attempt": state["rethlas_attempts"],
+            "verdict": {"verdict": "wrong", "verification_report": {"summary": "无证明输出", "critical_errors": [], "gaps": []}},
+            "proof": "(empty)",
+        })
+        state["rethlas_failed"] = state["rethlas_attempts"] >= 3
+        state["stage"] = "AUTOFORMALIZE" if state["rethlas_attempts"] >= 3 else "RETHLAS"
+        return state
 
     ver_prompt = _read_prompt(_VER_PROMPT)
     if not ver_prompt:
@@ -314,6 +424,9 @@ def verifier_node(state: UnifiedState) -> UnifiedState:
             "2. 检查定理引用的正确性\n"
             "3. 检查外部引用的准确性\n"
             "4. 检查缺失的假设和未证明的跳步\n\n"
+            "## 裁定规则（严格）\n"
+            "- correct ⇔ critical_errors=[] AND gaps=[]\n"
+            "- wrong 时 repair_hints 非空\n\n"
             "## 输出 JSON\n"
             '{"verification_report":{"summary":"...","critical_errors":[],"gaps":[]},"verdict":"correct|wrong","repair_hints":"..."}\n'
         )
@@ -763,8 +876,8 @@ def prover_node(state: UnifiedState) -> UnifiedState:
     logger.info("[prove-node] 处理 %d 个文件 (SubagentExecutor)", len(pending))
 
     all_tools = get_available_tools(subagent_enabled=True)
-    # 附加 Rethlas 自适应技能 tools（LLM 动态选择）
-    all_tools = list(all_tools) + Rethlas_SKILL_TOOLS
+    # 注: Rethlas 自适应技能 tool 现在在 rethlas_agent_node 中使用,
+    # Archon prover 只需 LSP MCP tools
     executor = SubagentExecutor(config=UNIFIED_PROVER_CONFIG, tools=all_tools, thread_id=thread_id)
 
     completed = list(state.get("completed", []))
@@ -963,13 +1076,30 @@ def review_agent_node(state: UnifiedState) -> UnifiedState:
 # ── 路由 ──────────────────────────────────────────────────────────────
 
 
-def route_rethlas(state: UnifiedState) -> str:
+def route_rethlas_after_agent(state: UnifiedState) -> str:
+    """rethlas_agent_node 之后的路由。
+    - proof 通过验证 → autoformalize
+    - 未通过但 attempt < 3 → rethlas_agent (继续)
+    - 3 次全失败 → rethlas_report
+    """
     stage = state.get("stage", "")
     if stage == "AUTOFORMALIZE":
         return "autoformalize"
-    if stage == "RETHLAS" or state.get("rethlas_failed"):
-        return "rethlas_report" if state.get("rethlas_failed") else "generator"
-    return "generator"
+    if state.get("rethlas_failed"):
+        return "rethlas_report"
+    # 未失败：进入验证节点
+    return "verifier"
+
+
+def route_after_verify(state: UnifiedState) -> str:
+    """verifier_node 之后的路由。"""
+    stage = state.get("stage", "")
+    if stage == "AUTOFORMALIZE":
+        return "autoformalize"
+    if state.get("rethlas_failed"):
+        return "rethlas_report"
+    # 仍需要更多 attempt: 回到 rethlas_agent
+    return "rethlas_agent"
 
 
 def route_archon(state: UnifiedState) -> str:
@@ -977,7 +1107,7 @@ def route_archon(state: UnifiedState) -> str:
     if stage == "COMPLETE":
         return "polish"
     if stage == "RETHLAS":
-        return "generator"
+        return "rethlas_agent"
     return "review_agent_node"
 
 
@@ -985,29 +1115,49 @@ def route_archon(state: UnifiedState) -> str:
 
 
 def build_unified_graph():
+    """构建统一证明 StateGraph。
+    
+    改造后 (2026-05-20):
+    search → rethlas_agent → verifier → (loop ≤3)
+            ├── → autoformalize → planner → prover → reviewer → ...
+            └── → rethlas_report → END
+    """
     w = StateGraph(UnifiedState)
+    # Rethlas 侧节点
     w.add_node("search", search_node)
-    w.add_node("generator", generator_node)
+    w.add_node("rethlas_agent", rethlas_agent_node)
     w.add_node("verifier", verifier_node)
     w.add_node("rethlas_report", failure_report_node)
+    # Archon 侧节点
     w.add_node("autoformalize", autoformalize_node)
     w.add_node("planner", planner_node)
     w.add_node("prover", prover_node)
     w.add_node("reviewer", reviewer_node)
     w.add_node("polish", polish_node)
     w.add_node("review_agent_node", review_agent_node)
+    
     w.set_entry_point("search")
-    w.add_edge("search", "generator")
-    w.add_edge("generator", "verifier")
-    w.add_conditional_edges("verifier", route_rethlas, {
-        "generator": "generator", "autoformalize": "autoformalize", "rethlas_report": "rethlas_report",
+    # Rethlas 自适应循环
+    w.add_edge("search", "rethlas_agent")
+    w.add_conditional_edges("rethlas_agent", route_rethlas_after_agent, {
+        "verifier": "verifier",
+        "autoformalize": "autoformalize",
+        "rethlas_report": "rethlas_report",
+    })
+    w.add_conditional_edges("verifier", route_after_verify, {
+        "rethlas_agent": "rethlas_agent",
+        "autoformalize": "autoformalize",
+        "rethlas_report": "rethlas_report",
     })
     w.add_edge("rethlas_report", END)
+    # Archon 侧
     w.add_edge("autoformalize", "planner")
     w.add_edge("planner", "prover")
     w.add_edge("prover", "reviewer")
     w.add_conditional_edges("reviewer", route_archon, {
-        "generator": "generator", "review_agent_node": "review_agent_node", "polish": "polish",
+        "rethlas_agent": "rethlas_agent",
+        "review_agent_node": "review_agent_node",
+        "polish": "polish",
     })
     w.add_edge("polish", "review_agent_node")
     w.add_edge("review_agent_node", "planner")

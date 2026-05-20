@@ -1,7 +1,22 @@
 # TODO.md — 待解决问题
 
 > 未完成的功能、已知问题、待改进项。按优先级排列。
-> 上次更新: 2026-05-19
+> 上次更新: 2026-05-20
+
+---
+
+## ✅ 2026-05-20 修复记录
+
+| 差距 | 描述 | 修复方式 |
+|:----:|------|---------|
+| R1 | generator_node 裸 model.invoke() | → `rethlas_agent_node` 用 `create_deerflow_agent()` |
+| R2 | verifier_node 无 schema 验证 | → `verify_proof_tool` 内建严格验证 + 保留 verifier_node 作为 gate |
+| R3 | 只有 5/10 skills | → `skill_tools.py` 扩展到 10 个 tool |
+| R4 | tools 绑在 prover 非 generator | → `archon_graph.py`/`unified_graph.py` prover 中移除 Rethlas_SKILL_TOOLS |
+| R5 | 无 recursive-proving | → `recursive_proving_tool` 支持多 proof plan 并行探索 |
+| R7 | 固定 pipeline 非自适应 | → `rethlas_agent_node` 使用 `create_deerflow_agent()` agent loop |
+| R9 | create_deerflow_agent 未用 | → 已在 `rethlas_agent_node` 中使用（带回退） |
+| R10 | SubagentConfig 不接受 per-plan 覆盖 | → `recursive_proving_tool` 内部 `_run_single_plan()` 接受 `system_prompt` 参数 |
 
 ---
 

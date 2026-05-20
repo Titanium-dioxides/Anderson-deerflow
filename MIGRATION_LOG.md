@@ -1,6 +1,21 @@
 # MIGRATION_LOG.md — Archon + Rethlas → DeerFlow 移植记录
 
-## 2026-05-19
+## 2026-05-20
+
+### [rethlas-agent-refactor] Rethlas 固定 pipeline → create_deerflow_agent 自适应循环
+- **文件:** `overlay/backend/workflows/skill_tools.py`, `overlay/backend/workflows/unified_graph.py`, `overlay/backend/workflows/archon_graph.py`, `paper_diagrams/`
+- **skill_tools.py:** 从 5 个 tool 扩展到 10 个（补齐 obtain_immediate_conclusions, direct_proving, recursive_proving, query_memory, verify_proof）
+- **unified_graph.py:**
+  - 新增 `rethlas_agent_node` — 使用 `create_deerflow_agent(model, tools=Rethlas_SKILL_TOOLS)` 替代原 `generator_node` + `verifier_node` 固定 pipeline
+  - 新增 `_build_rethlas_system_prompt()` — 从 math-prover SKILL.md 加载自适应循环指令 + 注入 attempt history/feedback tier
+  - 新增 `route_rethlas_after_agent()` / `route_after_verify()` — 新的路由逻辑
+  - 旧 `generator_node` + `verifier_node` → `rethlas_agent_node` + 保 `verifier_node` 作为最终 gate
+  - 图结构: `search → rethlas_agent → verifier → (loop ≤3) → autoformalize | rethlas_report`
+  - prover_node 中移除 Rethlas_SKILL_TOOLS（它们属于 Rethlas 侧，非 Archon 侧）
+- **archon_graph.py:** prover_node 中移除 Rethlas_SKILL_TOOLS 引用
+- **paper_diagrams/:** 新增 4 个 Mermaid 工作流图（原版 Archon、原版 Rethlas、当前、目标）
+- **recursive_proving_tool:** 支持多 proof plan 并行 — `_run_single_plan()` 为每个 plan 创建独立线程调用 LLM
+- **测试:** 语法 + AST 编译 + tool 计数 (10/10) + 函数存在性 + 图结构 ✅
 
 ### [pr456] PR4/S1 + PR5 + PR6: Rethlas 自适应技能 + 回环策略 + 多路探索
 - **文件:** `overlay/backend/workflows/unified_graph.py`

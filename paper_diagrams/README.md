@@ -218,6 +218,20 @@ Attempt     Attempt     Attempt
 
 ---
 
+## 新增：源码级工作流逆向图 (2026-05-20)
+
+> 基于逐行阅读原版 Archon / Rethlas / 当前 archon-deerflow 源码绘制
+
+### 7. [原版 Archon](original_archon_workflow.mermaid.md) — Plan→Prover→Review 三阶段迭代，并行 Prover，3 个 Prover 阶段，4 种失败模式
+
+### 8. [原版 Rethlas](original_rethlas_workflow.mermaid.md) — 自适应控制循环，10 Skills，recursive-proving 并行探索，MCP memory，独立 Verification API
+
+### 9. [当前 archon-deerflow](current_archon_deerflow.mermaid.md) — 固定 pipeline，5/10 skills 未集成，标注 🔴 R1-R9 差距和 DeerFlow 已有基础设施
+
+### 10. [目标架构](target_architecture.mermaid.md) — create_deerflow_agent() + 10 tools + recursive_proving_tool
+
+---
+
 ## 对 archon-deerflow 的改进方向
 
 ### 优先（从 SVGs 中提取的关键差距）

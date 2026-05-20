@@ -427,7 +427,140 @@ def load_memory(ws: str) -> dict:
         return {}
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# R8: Rethlas 10-channel JSONL Memory (原版 MCP memory 移植)
+# ═══════════════════════════════════════════════════════════════════════
 
+_RETHLAS_CHANNELS = {
+    "conclusions":       "immediate_conclusions.jsonl",
+    "examples":          "toy_examples.jsonl",
+    "counterexamples":   "counterexamples.jsonl",
+    "decompositions":    "subgoals.jsonl",
+    "proof_steps":       "proof_steps.jsonl",
+    "failed_paths":      "failed_paths.jsonl",
+    "verifications":     "verification_reports.jsonl",
+    "recursive_results": "recursive_results.jsonl",
+    "search_results":    "search_results.jsonl",
+    "failures":          "failures.jsonl",
+}
+
+
+def _rethlas_memory_dir(ws: str, problem_id: str = "default") -> Path:
+    return Path(ws) / ".archon-journal" / "rethlas_memory" / problem_id
+
+
+def init_rethlas_memory(ws: str, problem_id: str = "default", meta: dict | None = None) -> dict:
+    """初始化 Rethlas memory — 创建目录和 10 个 JSONL channel 文件。
+    
+    对应原版 Rethlas 的 memory_init(problem_id, meta)。
+    """
+    import json as _json
+    mem_dir = _rethlas_memory_dir(ws, problem_id)
+    mem_dir.mkdir(parents=True, exist_ok=True)
+    created = {}
+    for channel, filename in _RETHLAS_CHANNELS.items():
+        fp = mem_dir / filename
+        if not fp.exists():
+            fp.write_text("")
+        created[channel] = str(fp)
+    if meta:
+        meta_path = mem_dir / "meta.json"
+        existing = {}
+        if meta_path.exists():
+            try:
+                existing = _json.loads(meta_path.read_text())
+            except Exception:
+                pass
+        existing.update(meta)
+        existing["updated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        meta_path.write_text(_json.dumps(existing, ensure_ascii=False, indent=2))
+    logger.info("[rethlas-memory] 初始化 %s (%d channels)", mem_dir, len(created))
+    return {"memory_dir": str(mem_dir), "channels": created}
+
+
+def append_rethlas_memory(ws: str, channel: str, record: dict, problem_id: str = "default") -> dict:
+    """追加一条记录到指定 channel。
+    
+    对应原版 Rethlas 的 memory_append(problem_id, channel, record)。
+    """
+    import json as _json
+    if channel not in _RETHLAS_CHANNELS:
+        raise ValueError(f"Unknown channel '{channel}'. Available: {list(_RETHLAS_CHANNELS)}")
+    init_rethlas_memory(ws, problem_id)
+    mem_dir = _rethlas_memory_dir(ws, problem_id)
+    fp = mem_dir / _RETHLAS_CHANNELS[channel]
+    entry = {
+        "timestamp_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "channel": channel,
+        "record": record,
+    }
+    with open(fp, "a", encoding="utf-8") as f:
+        f.write(_json.dumps(entry, ensure_ascii=False) + "\n")
+    return {"status": "ok", "channel": channel, "path": str(fp)}
+
+
+def search_rethlas_memory(ws: str, query: str, channels: list[str] | None = None,
+                          problem_id: str = "default", limit: int = 10) -> dict:
+    """搜索 Rethlas memory — 跨 channel 关键词匹配。
+    
+    对应原版 Rethlas 的 memory_search(problem_id, query, channels) (BM25 简化版)。
+    """
+    import json as _json
+    mem_dir = _rethlas_memory_dir(ws, problem_id)
+    if not mem_dir.exists():
+        return {"query": query, "results_by_channel": {}, "total": 0}
+    search_channels = channels or list(_RETHLAS_CHANNELS)
+    query_lower = query.lower()
+    keywords = [w for w in re.findall(r'[\w_]+', query_lower) if len(w) > 1]
+    results_by_channel = {}
+    total = 0
+    for channel in search_channels:
+        if channel not in _RETHLAS_CHANNELS:
+            continue
+        fp = mem_dir / _RETHLAS_CHANNELS[channel]
+        if not fp.exists():
+            continue
+        matched = []
+        try:
+            for line in fp.read_text(encoding="utf-8").strip().split("\n"):
+                if not line.strip():
+                    continue
+                try:
+                    entry = _json.loads(line)
+                except Exception:
+                    continue
+                record_str = _json.dumps(entry, ensure_ascii=False).lower()
+                hits = sum(1 for kw in keywords if kw in record_str)
+                if hits > 0 and keywords:
+                    matched.append({"score": round(hits / len(keywords), 2), "entry": entry})
+        except Exception as e:
+            logger.warning("[rethlas-memory] 搜索 %s 失败: %s", channel, e)
+        if matched:
+            matched.sort(key=lambda x: -x["score"])
+            results_by_channel[channel] = {"count": len(matched), "results": matched[:limit]}
+            total += len(matched)
+    logger.info("[rethlas-memory] 搜索 '%s' → %d 结果", query[:60], total)
+    return {"query": query, "results_by_channel": results_by_channel, "total": total}
+
+
+def read_rethlas_channel(ws: str, channel: str, problem_id: str = "default", limit: int = 20) -> list[dict]:
+    """读取指定 channel 的最近记录。"""
+    import json as _json
+    mem_dir = _rethlas_memory_dir(ws, problem_id)
+    if channel not in _RETHLAS_CHANNELS:
+        return []
+    fp = mem_dir / _RETHLAS_CHANNELS[channel]
+    if not fp.exists():
+        return []
+    items = []
+    for line in fp.read_text(encoding="utf-8").strip().split("\n"):
+        if not line.strip():
+            continue
+        try:
+            items.append(_json.loads(line))
+        except Exception:
+            continue
+    return items[-limit:] if len(items) > limit else items
 
 
 # ═══════════════════════════════════════════════════════════════════════

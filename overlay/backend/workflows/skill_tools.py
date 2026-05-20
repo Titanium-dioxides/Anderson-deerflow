@@ -81,23 +81,45 @@ def search_mathematical_results_tool(
 @tool("query_memory", parse_docstring=True)
 def query_memory_tool(
     query: str,
+    workspace_path: str = "",
+    problem_id: str = "default",
 ) -> str:
-    """搜索本地记忆中的已有结论、例子、反例、失败路径。
+    """搜索 Rethlas 10-channel JSONL memory 中的已有结论、例子、反例、失败路径。
 
+    对应原版 Rethlas 的 memory_search。
     当你想检查之前的结论是否对当前问题有用时使用。
     避免重复已经尝试过的失败路径。
 
     Args:
         query: 搜索查询（自然语言描述你想要的记忆内容）
+        workspace_path: 工作区路径（可选）
+        problem_id: 问题标识（默认 "default"）
     """
-    return (
-        f"搜索本地记忆中的相关内容：{query}\n\n"
-        f"请检查：\n"
-        f"1. 之前的结论是否有可复用的？\n"
-        f"2. 之前的失败路径是否应该避免？\n"
-        f"3. 之前的例子/反例是否能提供洞察？\n"
-        f"如有相关记忆，列出并说明如何应用到当前问题。"
-    )
+    if not workspace_path:
+        return (
+            f"无 workspace_path，无法搜索持久化 memory。"
+            f"请在上下文中检查以下内容（对应 query: {query}）："
+            f"1. 之前的结论是否有可复用的？"
+            f"2. 之前的失败路径是否应避免？"
+            f"3. 之前的例子/反例是否能提供洞察？"
+        )
+    try:
+        from .shared import search_rethlas_memory
+        results = search_rethlas_memory(ws=workspace_path, query=query, problem_id=problem_id)
+    except Exception as e:
+        return f"搜索 memory 失败: {e}。请基于上下文中的 attempt_history 继续推理。"
+    if results.get("total", 0) == 0:
+        return f"未在 memory 中找到 '{query}' 的相关记录。请继续推理或尝试其他 skill。"
+    lines = [f"找到 {results['total']} 条相关记忆：\n"]
+    for channel, data in results.get("results_by_channel", {}).items():
+        lines.append(f"## {channel} ({data['count']} 条)")
+        for r in data["results"][:3]:
+            e = r.get("entry", {})
+            rec = e.get("record", {})
+            ts = e.get("timestamp_utc", "")[:19]
+            lines.append(f"- [{ts}] score={r['score']}: {str(rec)[:250]}")
+        lines.append("")
+    return "\n".join(lines)
 
 
 # ═══════════════════════════════════════════════════════════════════════

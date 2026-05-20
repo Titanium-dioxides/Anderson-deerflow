@@ -45,6 +45,7 @@ from .shared import (  # E1: 从共享模块导入
     get_model_name, make_model,
     search_matlas,
     get_checkpointer,
+    init_rethlas_memory, append_rethlas_memory, search_rethlas_memory,
 )
 
 logger = logging.getLogger(__name__)
@@ -291,6 +292,16 @@ def search_node(state: UnifiedState) -> UnifiedState:
     state["messages"].append(HumanMessage(
         content=f"用户命题: {statement}\n\n{search_context}\n\n请根据搜索结果生成证明。"
     ))
+
+    # R8: 初始化 Rethlas 10-channel memory
+    ws = state.get("workspace_path", "")
+    if ws:
+        try:
+            init_rethlas_memory(ws, problem_id=state.get("thread_id", "rethlas"),
+                               meta={"statement": statement[:200]})
+        except Exception:
+            pass
+
     return state
 
 
@@ -392,6 +403,17 @@ def rethlas_agent_node(state: UnifiedState) -> UnifiedState:
     state["informal_proof"] = proof
     state["rethlas_attempts"] = rethlas_attempts + 1
     state["archon_feedback"] = ""
+
+    # R8: 自动持久化 — 保存本轮的 proof 和状态到 rethlas_memory
+    ws = state.get("workspace_path", "")
+    if ws and proof:
+        try:
+            append_rethlas_memory(ws, "proof_steps", {
+                "attempt": rethlas_attempts + 1,
+                "proof_length": len(proof),
+            }, problem_id=state.get("thread_id", "rethlas"))
+        except Exception as e:
+            logger.debug("[rethlas-agent] memory 保存跳过: %s", e)
 
     return state
 

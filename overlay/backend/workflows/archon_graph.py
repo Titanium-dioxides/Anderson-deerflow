@@ -17,12 +17,13 @@ from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from deerflow.subagents import SubagentConfig, SubagentExecutor
-from deerflow.subagents.executor import (
-    SubagentStatus,
-    get_background_task_result,
-    cleanup_background_task,
-)
+# D1: SubagentConfig 定义在模块级 (仅 config, 不触发循环导入)
+# SubagentExecutor/SubagentStatus 等在函数内 lazy import 以避免容器内循环导入
+
+try:
+    from deerflow.subagents.config import SubagentConfig  # config.py 无循环导入
+except ImportError:
+    from deerflow.subagents import SubagentConfig  # fallback
 
 # 注: Rethlas 自适应技能 tools 已移至 unified_graph.py 的 rethlas_agent_node
 # archon_graph 专注 Lean4 证明，不需 Rethlas generation skills
@@ -363,7 +364,7 @@ def planner(state: ArchonState) -> ArchonState:
 # ═══════════════════════════════════════════════════════════════════════
 
 
-def _spawn_prove_subagent(executor: SubagentExecutor, t: dict, state: ArchonState) -> str | None:
+def _spawn_prove_subagent(executor, t: dict, state: ArchonState) -> str | None:
     """为单个文件 spawn subagent。返回 task_id; None 表示已自动解决。
     P3: 读取 user_hints / USER 注释注入提示。
     """
@@ -421,6 +422,9 @@ def _spawn_prove_subagent(executor: SubagentExecutor, t: dict, state: ArchonStat
 
 def _collect_subagent_result(task_id: str, t: dict, state: ArchonState,
                              max_wait: int = 660) -> None:
+    from deerflow.subagents.executor import (  # lazy import
+        SubagentStatus, get_background_task_result, cleanup_background_task,
+    )
     """收集 subagent 结果并更新 state。"""
     ws = state["workspace_path"]
     f = t["file"]
@@ -474,6 +478,7 @@ def prover(state: ArchonState) -> ArchonState:
     1.5: dry_run=True 时跳过 LLM 调用
     """
     from deerflow.tools import get_available_tools
+    from deerflow.subagents import SubagentExecutor  # lazy import 避免循环导入
 
     ws = state["workspace_path"]
     pending = state.get("pending", [])

@@ -24,12 +24,18 @@ from langgraph.graph.message import add_messages
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from deerflow.config.app_config import get_app_config
-from deerflow.subagents import SubagentConfig, SubagentExecutor
-from deerflow.subagents.executor import (
-    SubagentStatus,
-    get_background_task_result,
-    cleanup_background_task,
-)
+from deerflow.subagents import SubagentConfig  # config only
+try:
+    from deerflow.subagents.executor import (  # 在函数内 lazy import
+        SubagentStatus,
+        get_background_task_result,
+        cleanup_background_task,
+    )
+except ImportError:
+    # 容器内可能循环导入，函数内 lazy import
+    SubagentStatus = None
+    get_background_task_result = None
+    cleanup_background_task = None
 
 from .skill_tools import Rethlas_SKILL_TOOLS  # 自适应技能 tools (现已 10 个)
 
@@ -926,7 +932,7 @@ UNIFIED_PROVER_CONFIG = SubagentConfig(
 )
 
 
-def _spawn_prove_subagent(executor: SubagentExecutor, t: dict, state: UnifiedState) -> str | None:
+def _spawn_prove_subagent(executor, t: dict, state: UnifiedState) -> str | None:
     ws = state["workspace_path"]
     f = t["file"]
     line = t.get("line", "?")
@@ -972,6 +978,9 @@ def _spawn_prove_subagent(executor: SubagentExecutor, t: dict, state: UnifiedSta
 
 
 def _collect_prove_result(task_id: str, t: dict, state: UnifiedState, max_wait: int = 660) -> None:
+    from deerflow.subagents.executor import (
+        SubagentStatus, get_background_task_result, cleanup_background_task,
+    )
     ws = state["workspace_path"]
     f = t["file"]
     deadline = time.time() + max_wait
@@ -1011,6 +1020,7 @@ def _collect_prove_result(task_id: str, t: dict, state: UnifiedState, max_wait: 
 
 def prover_node(state: UnifiedState) -> UnifiedState:
     from deerflow.tools import get_available_tools
+    from deerflow.subagents import SubagentExecutor  # lazy import
 
     ws = state["workspace_path"]
     pending = state.get("pending", [])

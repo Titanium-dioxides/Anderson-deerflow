@@ -72,7 +72,7 @@ WORKDIR /app/deer-flow
 ENV PYTHONPATH=/app/deer-flow/backend/packages/harness:/app/deer-flow/overlay/backend:$PYTHONPATH
 ENV LANG=C.UTF-8 LC_ALL=C.UTF-8 PYTHONIOENCODING=utf-8
 
-COPY entrypoint.sh /entrypoint.sh
+COPY archon-deerflow/docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 ENTRYPOINT ["/entrypoint.sh"]

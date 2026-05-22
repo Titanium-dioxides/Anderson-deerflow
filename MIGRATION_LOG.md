@@ -15,3 +15,4 @@ YYYY-MM-DD: [组件] 改动说明
 2026-05-22: [治理] 更新 `TODO.md` 顶部执行基线，将后续开发主路线切换到阶段式 DeerFlow-native 重构。
 2026-05-22: [清理] 清理旧版分析/比较/审计文档，新增新版 `README.md` 作为开发入口，并保留 `source_paper.md` 作为论文基线。
 2026-05-22: [Phase1] 新增 `overlay/backend` 最小 runtime skeleton、`extensions_config.json`、`docker/entrypoint.sh`，启动 DeerFlow-native Phase 1 开发。
+2026-05-22: [Phase2] 新增 `overlay/backend/workflows/phase2_rethlas.py`，建立 Rethlas 双代理结构、problem memory channels 与 Phase 2 graph 骨架。

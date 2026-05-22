@@ -6,6 +6,7 @@
   ],
   "env": ".env",
   "graphs": {
-    "archon_deerflow_phase1": "workflows.phase1_runtime:build_phase1_graph"
+    "archon_deerflow_phase1": "workflows.phase1_runtime:build_phase1_graph",
+    "archon_deerflow_phase2_rethlas": "workflows.phase2_rethlas:build_phase2_rethlas_graph"
   }
 }

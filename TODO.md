@@ -18,7 +18,7 @@
 当前最高优先级不再是继续对现实现状做零散修补，而是按阶段推进：
 
 1. **Phase 1 — DeerFlow Runtime 骨架（进行中）**
-2. **Phase 2 — Rethlas DeerFlow-native 化**
+2. **Phase 2 — Rethlas DeerFlow-native 化（进行中）**
 3. **Phase 3 — Archon Scaffolding**
 4. **Phase 4 — Archon Proving Loop**
 5. **Phase 5 — Polish / Export / Runtime History**
@@ -40,6 +40,18 @@
 - [ ] 校验 Docker 构建路径与 overlay 集成
 - [ ] 增加 workspace bootstrap 的最小运行测试
 - [ ] 冻结 Phase 1 layout manifest 契约
+
+### 当前 Phase 2 子任务
+
+- [x] 建立 `phase2_rethlas.py` 双代理骨架
+- [x] 注册 `archon_deerflow_phase2_rethlas` graph 入口
+- [x] 建立 Rethlas problem memory channels 基线
+- [x] 建立 generation / verification 两阶段节点
+- [ ] 用 DeerFlow agent runtime 替换 generation 节点中的占位实现
+- [ ] 用 DeerFlow agent runtime 替换 verification 节点中的占位实现
+- [ ] 将 10 个 skill tools 接到实际 DeerFlow tool/runtime 路径
+- [ ] 将 recursive proving 升级到 DeerFlow subagent runtime
+- [ ] 增加 Phase 2 最小运行测试
 
 ---
 

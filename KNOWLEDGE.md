@@ -53,3 +53,19 @@
   - `overlay/backend/workflows/phase1_runtime.py`
   - 生成 `phase1_layout.json`
   - 对齐 `/mnt/user-data/{workspace,uploads,outputs}` 语义
+
+## K008 — Phase 2 的第一目标是保住 Rethlas 结构
+
+- **结论**: Phase 2 首先要恢复论文中的 generation/verification 双代理结构，而不是立即追求证明能力。
+- **当前实现**:
+  - `overlay/backend/workflows/phase2_rethlas.py`
+  - `RETHLAS_SKILL_NAMES`
+  - `RETHLAS_MEMORY_CHANNELS`
+  - generation / verification graph nodes
+
+## K009 — problem memory 先于真实推理能力落地
+
+- **结论**: 在 Phase 2 中，先固定 Rethlas problem memory 目录和 channel 契约是合理的。
+- **原因**:
+  - 这是后续 skills、recursive proving、review 的共享数据底座
+  - 能先把论文结构中的 memory discipline 固定下来

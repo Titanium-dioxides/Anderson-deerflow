@@ -37,6 +37,13 @@
 - **说明**: 当前已建立 Phase 1 graph skeleton，但尚未接通 DeerFlow Gateway 实际运行入口。
 - **影响**: 目前能完成代码与目录骨架验证，但还不能视为“通过 DeerFlow runtime 完整启动”。
 
+### B-004 Phase 2 仍为结构骨架，未接 DeerFlow agent runtime
+
+- **状态**: active
+- **范围**: Rethlas generation / verification
+- **说明**: 当前 Phase 2 已建立双代理阶段结构，但 generation / verification 仍为占位节点，尚未接入 DeerFlow agent runtime 与真实 tool loop。
+- **影响**: 目前只能验证 Rethlas 结构与 memory 目录骨架，不能验证论文级探索能力。
+
 ---
 
 ## 已解除 Blockers

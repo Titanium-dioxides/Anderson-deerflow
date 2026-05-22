@@ -21,12 +21,13 @@
 ```bash
 test -f DEERFLOW_NATIVE_MIGRATION_FRAMEWORK.md
 test -f DEVELOPMENT_ROADMAP.md
+test -f README.md
 test -f MIGRATION_LOG.md
 test -f SMOKE_TEST_LOG.md
 test -f BLOCKERS.md
 test -f KNOWLEDGE.md
 test -f AUDIT.md
-rg -n "^# " DEERFLOW_NATIVE_MIGRATION_FRAMEWORK.md DEVELOPMENT_ROADMAP.md MIGRATION_LOG.md SMOKE_TEST.md SMOKE_TEST_LOG.md BLOCKERS.md KNOWLEDGE.md AUDIT.md TODO.md
+rg -n "^# " README.md DEERFLOW_NATIVE_MIGRATION_FRAMEWORK.md DEVELOPMENT_ROADMAP.md MIGRATION_LOG.md SMOKE_TEST.md SMOKE_TEST_LOG.md BLOCKERS.md KNOWLEDGE.md AUDIT.md TODO.md
 ```
 
 ---
@@ -101,4 +102,3 @@ test -f overlay/backend/langgraph.json
   - 保留辅助测试代码或说明
   - 记录失败原因
   - 同步更新 `BLOCKERS.md` 或 `TODO.md`
-

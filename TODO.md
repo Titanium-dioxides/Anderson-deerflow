@@ -1,7 +1,33 @@
 # TODO.md — 待解决问题
 
 > 未完成的功能、已知问题、待改进项。按优先级排列。
-> 上次更新: 2026-05-20
+> 上次更新: 2026-05-22
+
+---
+
+## 🚧 当前执行基线（2026-05-22）
+
+自 2026-05-22 起，开发主路线以以下文档为准：
+
+- `DEERFLOW_NATIVE_MIGRATION_FRAMEWORK.md`
+- `DEVELOPMENT_ROADMAP.md`
+- `SMOKE_TEST.md`
+- `BLOCKERS.md`
+- `AUDIT.md`
+
+当前最高优先级不再是继续对现实现状做零散修补，而是按阶段推进：
+
+1. **Phase 1 — DeerFlow Runtime 骨架**
+2. **Phase 2 — Rethlas DeerFlow-native 化**
+3. **Phase 3 — Archon Scaffolding**
+4. **Phase 4 — Archon Proving Loop**
+5. **Phase 5 — Polish / Export / Runtime History**
+6. **Phase 6 — 端到端验收**
+
+说明：
+
+- 旧 TODO 内容保留，作为历史差距记录与补充来源
+- 后续新增待办应优先归档到上述阶段中
 
 ---
 

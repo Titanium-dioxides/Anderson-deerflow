@@ -38,3 +38,18 @@
 
 - **结论**: Review Agent 不是报告装饰层，而是下一轮策略的输入层。
 
+## K006 — Phase 1 的最小代码落点
+
+- **结论**: 新版代码骨架采用 `overlay/backend` 作为迁移实现层。
+- **原因**:
+  - 与现有 Dockerfile 路径一致
+  - 可作为 DeerFlow backend 的附加 workflow 层
+  - 便于后续逐步补齐 graph、workflows、runtime helpers
+
+## K007 — Phase 1 的第一目标是 layout bootstrap
+
+- **结论**: Phase 1 首个可验证目标不是 proving，而是 thread-scoped workspace layout。
+- **当前实现**:
+  - `overlay/backend/workflows/phase1_runtime.py`
+  - 生成 `phase1_layout.json`
+  - 对齐 `/mnt/user-data/{workspace,uploads,outputs}` 语义

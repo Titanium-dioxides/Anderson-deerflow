@@ -17,7 +17,7 @@
 
 当前最高优先级不再是继续对现实现状做零散修补，而是按阶段推进：
 
-1. **Phase 1 — DeerFlow Runtime 骨架**
+1. **Phase 1 — DeerFlow Runtime 骨架（进行中）**
 2. **Phase 2 — Rethlas DeerFlow-native 化**
 3. **Phase 3 — Archon Scaffolding**
 4. **Phase 4 — Archon Proving Loop**
@@ -28,6 +28,18 @@
 
 - 旧 TODO 内容保留，作为历史差距记录与补充来源
 - 后续新增待办应优先归档到上述阶段中
+
+### 当前 Phase 1 子任务
+
+- [x] 建立 `overlay/backend` 新版 workflow 代码入口
+- [x] 建立 `overlay/backend/langgraph.json` Phase 1 graph 注册
+- [x] 建立 thread-scoped workspace layout bootstrap 节点
+- [x] 补齐 `extensions_config.json` 基线
+- [x] 补齐 `docker/entrypoint.sh` 基线
+- [ ] 将 Phase 1 workflow 接入 DeerFlow Gateway 运行路径
+- [ ] 校验 Docker 构建路径与 overlay 集成
+- [ ] 增加 workspace bootstrap 的最小运行测试
+- [ ] 冻结 Phase 1 layout manifest 契约
 
 ---
 

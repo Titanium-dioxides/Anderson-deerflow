@@ -25,14 +25,20 @@
 
 ### B-002 DeerFlow-native 重构尚未开始
 
-- **状态**: active
+- **状态**: resolved
 - **范围**: workflow runtime
-- **说明**: 当前仅完成规范与路线图文档，尚未开始按新规范重构 workflow。
-- **影响**: 现代码不能视为目标架构实现。
+- **说明**: Phase 1 已启动，最小 runtime skeleton 已落地到 `overlay/backend/workflows/phase1_runtime.py`。
+- **解除时间**: 2026-05-22
+
+### B-003 DeerFlow Gateway 路径尚未接通新 workflow
+
+- **状态**: active
+- **范围**: Phase 1 runtime integration
+- **说明**: 当前已建立 Phase 1 graph skeleton，但尚未接通 DeerFlow Gateway 实际运行入口。
+- **影响**: 目前能完成代码与目录骨架验证，但还不能视为“通过 DeerFlow runtime 完整启动”。
 
 ---
 
 ## 已解除 Blockers
 
-- 暂无
-
+- B-002 DeerFlow-native 重构尚未开始（2026-05-22）

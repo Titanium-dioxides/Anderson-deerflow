@@ -16,24 +16,15 @@ import json
 from pathlib import Path
 from typing import Annotated, Literal, TypedDict
 
+from langchain_core.messages import HumanMessage
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
 
 from .phase1_runtime import _memory_checkpointer, _runtime_root, bootstrap_layout
+from .rethlas_skill_tools import RETHLAS_SKILL_TOOLS
 
 
-RETHLAS_SKILL_NAMES = [
-    "obtain_immediate_conclusions",
-    "search_mathematical_results",
-    "query_memory",
-    "construct_examples",
-    "construct_counterexamples",
-    "propose_decomposition",
-    "direct_proving",
-    "recursive_proving",
-    "identify_key_failures",
-    "verify_proof",
-]
+RETHLAS_SKILL_NAMES = [tool.name for tool in RETHLAS_SKILL_TOOLS]
 
 RETHLAS_MEMORY_CHANNELS = [
     "conclusions",
@@ -87,6 +78,51 @@ def _host_project_root(thread_id: str, project_name: str) -> Path:
     return _runtime_root() / "threads" / thread_id / "user-data" / "workspace" / project_name
 
 
+def _make_model():
+    try:
+        from deerflow.models import create_chat_model
+    except ImportError:
+        from deerflow.models.factory import create_chat_model
+
+    model_name = "deepseek-v4"
+    try:
+        from deerflow.config import get_app_config
+
+        config = get_app_config()
+        if getattr(config, "models", None):
+            model_name = config.models[0].name
+    except Exception:
+        pass
+    return create_chat_model(model_name, thinking_enabled=True)
+
+
+def _extract_last_content(result) -> str:
+    if isinstance(result, dict):
+        messages = result.get("messages", [])
+        if messages:
+            last = messages[-1]
+            return str(getattr(last, "content", last))
+    return str(result)
+
+
+def _run_deerflow_agent(prompt: str, *, system_prompt: str, tools=None, thread_id: str) -> str:
+    try:
+        from deerflow.agents.factory import create_deerflow_agent
+    except ImportError:
+        from deerflow.agents import create_deerflow_agent
+
+    agent = create_deerflow_agent(
+        model=_make_model(),
+        tools=tools or [],
+        system_prompt=system_prompt,
+    )
+    result = agent.invoke(
+        {"messages": [HumanMessage(content=prompt)]},
+        config={"configurable": {"thread_id": thread_id}},
+    )
+    return _extract_last_content(result)
+
+
 def initialize_rethlas_memory(state: Phase2RethlasState) -> Phase2RethlasState:
     thread_id = state["thread_id"]
     project_name = state["project_name"]
@@ -130,18 +166,33 @@ def generation_agent_node(state: Phase2RethlasState) -> Phase2RethlasState:
     project_name = state["project_name"]
     project_root = _host_project_root(thread_id, project_name)
     candidate_path = project_root / "informal" / "proofs" / "candidate_proof.md"
+    statement = state.get("statement", "").strip() or "(missing statement)"
+    system_prompt = (
+        "You are the Rethlas generation agent.\n"
+        "Follow the paper-aligned workflow: assess state, choose skills adaptively, "
+        "explore examples/counterexamples/decomposition plans, and produce a candidate proof.\n"
+        "Do not claim formal verification; produce an informal proof draft."
+    )
+    prompt = (
+        f"Problem statement:\n{statement}\n\n"
+        f"Available skills:\n- " + "\n- ".join(RETHLAS_SKILL_NAMES) + "\n\n"
+        "Produce a candidate informal proof draft. If useful, call skills before concluding."
+    )
+    generated = _run_deerflow_agent(
+        prompt,
+        system_prompt=system_prompt,
+        tools=RETHLAS_SKILL_TOOLS,
+        thread_id=f"{thread_id}-rethlas-generation",
+    )
     content = [
         "# Candidate Informal Proof",
         "",
-        f"## Statement",
-        state.get("statement", "").strip() or "(missing statement)",
+        "## Statement",
+        statement,
         "",
-        "## Status",
-        "Phase 2 skeleton only — generation agent runtime wiring starts here.",
-        "",
-        "## Planned Skills",
+        "## Draft",
+        generated.strip() or "(empty generation output)",
     ]
-    content.extend(f"- {name}" for name in RETHLAS_SKILL_NAMES)
     candidate_path.write_text("\n".join(content))
 
     return {
@@ -157,12 +208,33 @@ def verification_agent_node(state: Phase2RethlasState) -> Phase2RethlasState:
     project_name = state["project_name"]
     project_root = _host_project_root(thread_id, project_name)
     report_path = project_root / "informal" / "verification" / "verification_report.json"
+    statement = state.get("statement", "").strip() or "(missing statement)"
+    candidate_virtual_path = state.get("candidate_proof_path", "")
+    candidate_host_path = project_root / "informal" / "proofs" / "candidate_proof.md"
+    proof_text = candidate_host_path.read_text() if candidate_host_path.exists() else ""
+    system_prompt = (
+        "You are the Rethlas verification agent.\n"
+        "Check the candidate proof critically. Output a compact JSON object with keys: "
+        "verdict, summary, repair_hints."
+    )
+    prompt = (
+        f"Statement:\n{statement}\n\n"
+        f"Candidate proof file: {candidate_virtual_path}\n\n"
+        f"Candidate proof contents:\n{proof_text}\n\n"
+        "Return JSON only. verdict must be one of: correct, wrong, pending."
+    )
+    verification_output = _run_deerflow_agent(
+        prompt,
+        system_prompt=system_prompt,
+        tools=[],
+        thread_id=f"{thread_id}-rethlas-verification",
+    )
     report = {
         "phase": "phase2_rethlas",
         "verdict": "pending",
-        "reason": "Phase 2 skeleton only — verification agent runtime wiring starts here.",
-        "candidate_proof_path": state.get("candidate_proof_path", ""),
+        "candidate_proof_path": candidate_virtual_path,
         "attempts": state.get("attempts", 0),
+        "raw_verification_output": verification_output,
     }
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2))
 

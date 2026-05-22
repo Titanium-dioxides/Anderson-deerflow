@@ -39,13 +39,21 @@
 
 ### B-004 Phase 2 仍为结构骨架，未接 DeerFlow agent runtime
 
-- **状态**: active
+- **状态**: resolved
 - **范围**: Rethlas generation / verification
-- **说明**: 当前 Phase 2 已建立双代理阶段结构，但 generation / verification 仍为占位节点，尚未接入 DeerFlow agent runtime 与真实 tool loop。
-- **影响**: 目前只能验证 Rethlas 结构与 memory 目录骨架，不能验证论文级探索能力。
+- **说明**: Phase 2 的 generation / verification 已切到 DeerFlow agent runtime，并建立了最小 skill tool 暴露层。
+- **解除时间**: 2026-05-22
+
+### B-005 Phase 2 缺少 recursive proving 的 DeerFlow subagent runtime
+
+- **状态**: active
+- **范围**: Rethlas recursive exploration
+- **说明**: 当前 Phase 2 已接入 generation / verification runtime，但 recursive proving 仍未建立 DeerFlow subagent 执行路径。
+- **影响**: 论文中的多路径递归探索能力尚未恢复。
 
 ---
 
 ## 已解除 Blockers
 
 - B-002 DeerFlow-native 重构尚未开始（2026-05-22）
+- B-004 Phase 2 仍为结构骨架，未接 DeerFlow agent runtime（2026-05-22）

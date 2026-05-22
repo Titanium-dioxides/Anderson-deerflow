@@ -69,3 +69,10 @@
 - **原因**:
   - 这是后续 skills、recursive proving、review 的共享数据底座
   - 能先把论文结构中的 memory discipline 固定下来
+
+## K010 — Phase 2 的 runtime 接入应分两层
+
+- **结论**: 先接通 generation / verification 的 DeerFlow agent runtime，再处理 recursive proving 的 subagent runtime。
+- **原因**:
+  - generation / verification 是论文结构最外层闭环
+  - recursive proving 是二阶能力，可在主闭环稳定后接入

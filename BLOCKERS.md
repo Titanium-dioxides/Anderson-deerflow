@@ -16,12 +16,19 @@
 
 ## 当前 Blockers
 
+### B-006 DeerFlow runtime 持久 history / checkpointer 尚未真正接线
+
+- **状态**: resolved
+- **范围**: Phase 1 / Phase 5 runtime integration
+- **说明**: `phase1_runtime.py` 现已优先使用 `SqliteSaver` 持久 checkpointer，并建立 thread-scoped `runtime/run_history.jsonl`；`phase5_polish.py` 改为读取该 runtime event log 做 history alignment。
+- **解除时间**: 2026-05-24
+
 ### B-001 外部原始代码对齐尚未完成
 
-- **状态**: active
+- **状态**: resolved
 - **范围**: Rethlas / Archon 编排完全对齐
-- **说明**: 当前仓库已纳入 `Archon/`、`Rethlas/` 参考副本，但尚未逐项建立“论文 -> 原实现 -> DeerFlow 新实现”的行为映射表。
-- **影响**: 在进入大规模代码重构前，需先完成对齐清单，否则易出现能力回退。
+- **说明**: 对齐表已完成 → `AUDIT.md`。覆盖 Rethlas 12 项、Archon 9 项、三阶段 3 项、基础设施 10 项、搜索可信度 6 项、端到端 5 项。
+- **解除时间**: 2026-05-24
 
 ### B-002 DeerFlow-native 重构尚未开始
 
@@ -32,10 +39,10 @@
 
 ### B-003 DeerFlow Gateway 路径尚未接通新 workflow
 
-- **状态**: active
+- **状态**: resolved
 - **范围**: Phase 1 runtime integration
-- **说明**: 当前已建立 Phase 1 graph skeleton，但尚未接通 DeerFlow Gateway 实际运行入口。
-- **影响**: 目前能完成代码与目录骨架验证，但还不能视为“通过 DeerFlow runtime 完整启动”。
+- **说明**: 所有 graph 已注册到 `langgraph.json`；Python SDK 调用全流程验证通过（Cauchy-Schwarz 等）；Gateway REST API 连通性验证通过（health/models/list）；`scripts/prove.py` 命令行工具可用。
+- **解除时间**: 2026-05-24
 
 ### B-004 Phase 2 仍为结构骨架，未接 DeerFlow agent runtime
 
@@ -46,10 +53,10 @@
 
 ### B-005 Phase 2 缺少 recursive proving 的 DeerFlow subagent runtime
 
-- **状态**: active
+- **状态**: resolved
 - **范围**: Rethlas recursive exploration
-- **说明**: 当前 Phase 2 已接入 generation / verification runtime，但 recursive proving 仍未建立 DeerFlow subagent 执行路径。
-- **影响**: 论文中的多路径递归探索能力尚未恢复。
+- **说明**: `recursive_proving` tool 已生成结构化 subagent prompts；`_run_deerflow_agent` 支持 `subagent_enabled=True` → `RuntimeFeatures(subagent=True)` 注入 `task` tool。Phase 2 generation agent 已启用 subagent 并行探索。
+- **解除时间**: 2026-05-24
 
 ---
 

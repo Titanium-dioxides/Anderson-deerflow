@@ -7,6 +7,10 @@
   "env": ".env",
   "graphs": {
     "archon_deerflow_phase1": "workflows.phase1_runtime:build_phase1_graph",
-    "archon_deerflow_phase2_rethlas": "workflows.phase2_rethlas:build_phase2_rethlas_graph"
+    "archon_deerflow_phase2_rethlas": "workflows.phase2_rethlas:build_phase2_rethlas_graph",
+    "archon_deerflow_phase3_archon_scaffolding": "workflows.phase3_archon_scaffolding:build_phase3_archon_scaffolding_graph",
+    "archon_deerflow_phase4_archon_proving": "workflows.phase4_archon_proving:build_phase4_archon_proving_graph",
+    "archon_deerflow_phase5_polish": "workflows.phase5_polish:build_phase5_polish_graph",
+    "archon_deerflow_phase6_e2e": "workflows.phase6_e2e:build_phase6_e2e_graph"
   }
 }

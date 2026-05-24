@@ -76,3 +76,42 @@
 - **原因**:
   - generation / verification 是论文结构最外层闭环
   - recursive proving 是二阶能力，可在主闭环稳定后接入
+
+## K011 — 结构存在不等于论文能力已实现
+
+- **结论**: workflow 节点、manifest、目录结构存在，只能证明迁移骨架已建立，不能自动推断论文级行为已落地。
+- **含义**:
+  - 测试需要区分“结构断言”和“能力断言”
+  - `AUDIT.md` 中的状态必须反映真实运行行为，而不是只反映代码文件是否存在
+
+## K012 — Rethlas memory 必须按 thread/problem scoped 读取和写入
+
+- **结论**: `query_memory` 不能扫描整个 `.deerflow_runtime`，必须绑定当前 thread workspace 下的当前 problem memory。
+- **原因**:
+  - 否则会污染问题上下文
+  - verification-triggered repair 无法可靠复用上一轮失败总结
+
+## K013 — Phase 4 的 DeerFlow-native 化要区分“优先路径”和“真实主路径”
+
+- **结论**: 仅提供 `task` tool fallback 或 `get_available_tools()` fallback 还不够，真正的主路径应由 DeerFlow subagent/tool aggregation 驱动。
+- **当前状态**:
+  - Lean tools 已优先尝试 `get_available_tools(groups=["lean"])`
+  - Phase 4 已去掉本地线程池主导，改为 parent workflow 收集 subagent/task 结果
+
+## K014 — 持久 checkpointer 与 runtime history 需要放在线程级 runtime 根目录
+
+- **结论**: checkpointer 和 runtime event log 不应继续分散在各 phase manifest 里，而应放到 thread-scoped runtime 目录。
+- **当前实现**:
+  - `checkpoints/langgraph.sqlite` 作为优先持久 checkpointer 路径
+  - `threads/<thread_id>/runtime/run_history.jsonl` 作为 thread runtime event log
+  - Phase 5 从该 event log 读取并生成对齐报告
+
+## K015 — Rethlas skills 自己就是 memory producer
+
+- **结论**: problem memory 不应只由 workflow 节点事后补写，skill tools 本身也必须把结构化产物写回对应 channel。
+- **当前实现**:
+  - `obtain_immediate_conclusions` → `conclusions`
+  - `search_mathematical_results` / `query_memory` → `search_results`
+  - `construct_examples` / `construct_counterexamples` → `examples` / `counterexamples`
+  - `propose_decomposition` / `direct_proving` / `recursive_proving` → `decompositions` / `proof_steps` / `recursive_results`
+  - `identify_key_failures` / `verify_proof` → `failures` / `failed_paths` / `verifications`

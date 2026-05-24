@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Literal, TypedDict
 
@@ -21,12 +22,16 @@ from langgraph.graph import StateGraph
 from langgraph.graph.message import add_messages
 
 
-def _merge_artifacts(existing: list[str] | None, new: list[str] | None) -> list[str]:
+def merge_artifacts(existing: list[str] | None, new: list[str] | None) -> list[str]:
+    """Shared artifacts reducer — must be the *same object* across all phases."""
     merged: list[str] = []
     for item in (existing or []) + (new or []):
         if item not in merged:
             merged.append(item)
     return merged
+
+# Backward-compatible alias
+_merge_artifacts = merge_artifacts
 
 
 class Phase1State(TypedDict):
@@ -45,7 +50,7 @@ class Phase1State(TypedDict):
     journal_root: str
     manifests_root: str
     scratch_root: str
-    artifacts: Annotated[list[str], _merge_artifacts]
+    artifacts: Annotated[list[str], merge_artifacts]
 
 
 def _thread_id_from_config(config) -> str:
@@ -67,8 +72,61 @@ def _host_user_data_root(thread_id: str) -> Path:
     return _runtime_root() / "threads" / thread_id / "user-data"
 
 
+def _host_thread_root(thread_id: str) -> Path:
+    return _runtime_root() / "threads" / thread_id
+
+
 def _virtual_user_data_root() -> Path:
     return Path("/mnt/user-data")
+
+
+def _host_runtime_root(thread_id: str) -> Path:
+    return _host_thread_root(thread_id) / "runtime"
+
+
+def _host_runtime_history_path(thread_id: str) -> Path:
+    return _host_runtime_root(thread_id) / "run_history.jsonl"
+
+
+def _host_runtime_checkpoints_dir() -> Path:
+    return _runtime_root() / "checkpoints"
+
+
+def _host_runtime_checkpoint_path() -> Path:
+    return _host_runtime_checkpoints_dir() / "langgraph.sqlite"
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def log_runtime_event(thread_id: str, phase: str, node: str, payload: dict | None = None) -> None:
+    path = _host_runtime_history_path(thread_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "timestamp": _utc_now_iso(),
+        "thread_id": thread_id,
+        "phase": phase,
+        "node": node,
+        "payload": payload or {},
+    }
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def read_runtime_history(thread_id: str) -> list[dict]:
+    path = _host_runtime_history_path(thread_id)
+    if not path.exists():
+        return []
+    entries: list[dict] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            entries.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return entries
 
 
 def _build_layout(thread_id: str, project_name: str) -> dict[str, str]:
@@ -118,6 +176,7 @@ def bootstrap_layout(state: Phase1State, config=None) -> Phase1State:
     ]
     for directory in host_dirs:
         directory.mkdir(parents=True, exist_ok=True)
+    _host_runtime_root(thread_id).mkdir(parents=True, exist_ok=True)
 
     manifest_path = Path(layout["_host_project_root"]) / "manifests" / "phase1_layout.json"
     manifest = {
@@ -136,6 +195,15 @@ def bootstrap_layout(state: Phase1State, config=None) -> Phase1State:
         "phase": "phase1",
     }
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2))
+    log_runtime_event(
+        thread_id,
+        "phase1_runtime",
+        "bootstrap_layout",
+        {
+            "project_name": project_name,
+            "project_root": layout["project_root"],
+        },
+    )
 
     artifact_rel = f"{project_name}/manifests/phase1_layout.json"
     return {
@@ -159,16 +227,21 @@ def bootstrap_layout(state: Phase1State, config=None) -> Phase1State:
 
 
 def _memory_checkpointer():
+    checkpoint_dir = _host_runtime_checkpoints_dir()
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
     try:
         from langgraph.checkpoint.sqlite import SqliteSaver
 
-        db_path = os.environ.get("ARCHON_DEERFLOW_CHECKPOINT_DB", ".deerflow_runtime/checkpoints.db")
-        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        return SqliteSaver.from_conn_string(db_path)
+        checkpoint_path = _host_runtime_checkpoint_path()
+        if hasattr(SqliteSaver, "from_conn_string"):
+            return SqliteSaver.from_conn_string(str(checkpoint_path))
+        return SqliteSaver(str(checkpoint_path))
     except Exception:
-        from langgraph.checkpoint.memory import MemorySaver
-
-        return MemorySaver()
+        try:
+            from langgraph.checkpoint.memory import MemorySaver
+            return MemorySaver()
+        except Exception:
+            return None
 
 
 def build_phase1_graph():

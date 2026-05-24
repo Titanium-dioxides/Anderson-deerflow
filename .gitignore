@@ -1,10 +1,36 @@
-# Item 10: 审查期刊
-.archon-journal/
-
+# ── Secrets ──
 .env
+
+# ── OS / Editor ──
 .DS_Store
 *.swp
+*.swo
+
+# ── Python ──
 __pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# ── Configuration (local overrides) ──
 config.yaml
 extensions_config.json
 skills/custom/
+
+# ── Reference source copies (NOT part of this project) ──
+deer-flow/
+Archon/
+Rethlas/
+
+# ── Runtime data ──
+.deerflow_runtime/
+data/
+workspace/
+uploads/
+outputs/
+
+# ── Archon journal artifacts ──
+.archon-journal/
+
+# ── Docker ──
+*.tar.gz

@@ -1,11 +1,11 @@
 # TODO.md — 待解决问题
 
 > 未完成的功能、已知问题、待改进项。按优先级排列。
-> 上次更新: 2026-05-22
+> 上次更新: 2026-05-24
 
 ---
 
-## 🚧 当前执行基线（2026-05-22）
+## 🚧 当前执行基线（2026-05-23）
 
 自 2026-05-22 起，开发主路线以以下文档为准：
 
@@ -17,12 +17,12 @@
 
 当前最高优先级不再是继续对现实现状做零散修补，而是按阶段推进：
 
-1. **Phase 1 — DeerFlow Runtime 骨架（进行中）**
-2. **Phase 2 — Rethlas DeerFlow-native 化（进行中）**
-3. **Phase 3 — Archon Scaffolding**
-4. **Phase 4 — Archon Proving Loop**
-5. **Phase 5 — Polish / Export / Runtime History**
-6. **Phase 6 — 端到端验收**
+1. **Phase 1 — DeerFlow Runtime 骨架** ✅（Docker 已验证）
+2. **Phase 2 — Rethlas DeerFlow-native 化** 🔶（repair loop 已补齐，memory discipline 仍需强化）
+3. **Phase 3 — Archon Scaffolding** ✅
+4. **Phase 4 — Archon Proving Loop** ✅（subagent/task 主导，Lean tools 优先走 DeerFlow 聚合）
+5. **Phase 5 — Polish / Export / Runtime History** ✅
+6. **Phase 6 — 端到端验收** ✅
 
 说明：
 
@@ -36,9 +36,8 @@
 - [x] 建立 thread-scoped workspace layout bootstrap 节点
 - [x] 补齐 `extensions_config.json` 基线
 - [x] 补齐 `docker/entrypoint.sh` 基线
-- [ ] 将 Phase 1 workflow 接入 DeerFlow Gateway 运行路径
-- [ ] 校验 Docker 构建路径与 overlay 集成
-- [ ] 增加 workspace bootstrap 的最小运行测试
+- [x] 将 Phase 1 workflow 接入 DeerFlow Gateway 运行路径（Docker 已验证）
+- [x] 校验 Docker 构建路径与 overlay 集成
 - [ ] 冻结 Phase 1 layout manifest 契约
 
 ### 当前 Phase 2 子任务
@@ -49,9 +48,53 @@
 - [x] 建立 generation / verification 两阶段节点
 - [x] 用 DeerFlow agent runtime 替换 generation 节点中的占位实现
 - [x] 用 DeerFlow agent runtime 替换 verification 节点中的占位实现
-- [x] 建立 10 个 Rethlas skill tools 的 DeerFlow tool 暴露层
-- [ ] 将 recursive proving 升级到 DeerFlow subagent runtime
-- [ ] 增加 Phase 2 最小运行测试
+- [x] 建立 10 个 Rethlas skill tools 的实际实现（搜索/验证/记忆查询）
+- [x] 建立 generation → verification → repair loop（至多 3 轮）
+- [x] 将 verification 结果写回 proof memory（proof_steps / verifications / failures / failed_paths）
+- [x] 将 skills 输出系统化写入各 channel，而不是仅依赖 generation / verification 节点补写
+- [ ] 让 generation agent 在真实运行中稳定调用 `query_memory` / `recursive_proving`
+- [ ] 接入 Matlas API + Loogle + LeanSearch 为 Rethlas 定理搜索
+
+### 当前 Phase 3 子任务
+
+- [x] 建立 `phase3_archon_scaffolding.py` 工作流
+- [x] 实现 references ingestion / project init / autoformalize / module split / manifest 节点
+- [x] 注册 `archon_deerflow_phase3_archon_scaffolding` graph 入口
+- [x] 增加 Phase 3 测试用例
+
+### 当前 Phase 4 子任务
+
+- [x] 建立 `phase4_archon_proving.py` Plan/Lean/Reviewer/Review Agent 循环
+- [x] 实现 Phase 3 sync、plan agent、lean agents (并行)、reviewer、review agent 节点
+- [x] 注册 `archon_deerflow_phase4_archon_proving` graph 入口
+- [x] 增加 Phase 4 测试用例（含 subagent runtime 路径）
+- [x] Lean tools 优先切到 DeerFlow `get_available_tools()` 聚合主路径
+- [x] 去掉本地 `ThreadPoolExecutor` 主导的并行封装，改成 DeerFlow-native subagent orchestration 主导
+- [ ] 为 Plan/Lean/Review 三类 agent 分离 tool groups / MCP 权限边界
+
+### 2026-05-24 新增整改项
+
+- [ ] 将 `AUDIT.md` 中的“已完成”口径与真实代码保持同步，禁止结构占位被记为能力完成
+- [ ] 为 Phase 2 增加真实 repair loop 回归测试
+- [x] 为 DeerFlow runtime history / persistent checkpointer 接线增加专项验证
+- [ ] 为 middleware chain 的真实接线增加专项验证
+
+### 当前 Phase 5 子任务
+
+- [x] 建立 `phase5_polish.py` 全 8 节点 Polish/Export/Runtime History 工作流
+- [x] 实现 phase4_sync、sorry/axiom check、compile check、polish agent、artifact pack、export outputs、runtime history align、manifest 节点
+- [x] 注册 `archon_deerflow_phase5_polish` graph 入口
+- [x] 增加 Phase 5 测试用例（8 个，覆盖完整流程、Phase 4 失败处理、sorry/axiom 检测、compile check、polish fallback、export、manifest）
+
+### 当前 Phase 6 子任务
+
+- [x] 建立 `phase6_e2e.py` 端到端验收框架
+- [x] 实现全 5 阶段串联 runner（`e2e_run_node` + `e2e_verify_node`）
+- [x] 定义 6 道基准题：SIMPLE (2)、RETRIEVAL (2)、COMPLEX (2)
+- [x] 实现每阶段结构不变量校验（Phase 1-5 各 7-12 项检查）
+- [x] 实现 benchmark runner（`run_benchmark()`）
+- [x] 注册 `archon_deerflow_phase6_e2e` graph 入口
+- [x] 增加 Phase 6 E2E 测试用例（6 个，覆盖 3 类别 + 结构不变量 + report 生成）
 
 ---
 

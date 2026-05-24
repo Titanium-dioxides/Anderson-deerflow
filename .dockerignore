@@ -1,0 +1,57 @@
+# ── Git ──
+.git
+.gitignore
+.gitattributes
+
+# ── Python cache ──
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# ── Environment ──
+.env
+.venv
+venv/
+
+# ── Documentation (not needed at runtime) ──
+*.md
+!README.md
+
+# ── Tests (not needed in image) ──
+tests/
+.pytest_cache/
+
+# ── IDE / Editor ──
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# ── Docker ──
+docker/.dockerignore
+docker-compose*.yml
+.dockerignore
+
+# ── Runtime data (mounted at runtime) ──
+data/
+workspace/
+uploads/
+outputs/
+
+# ── Temp / scratch ──
+tmp/
+*.tmp
+*.log
+
+# ── External sources (NOT part of this project) ──
+# deer-flow is cloned from GitHub during Docker build, not from host
+deer-flow/
+Archon/
+Rethlas/
+
+# ── Plans / agents config ──
+.agents/
+.codex/
+.claude/

@@ -1,0 +1,97 @@
+# archon-deerflow Docker Compose
+# ============================================================================
+# Three-service stack:
+#   nginx     — reverse proxy on port 2026
+#   frontend  — Next.js web UI (cloned from deer-flow upstream)
+#   gateway   — FastAPI + LangGraph agent runtime + our Phase 1-6 overlay
+#
+# Usage:
+#   docker compose up -d              # Start
+#   docker compose up --build         # Rebuild all images
+#   docker compose logs -f            # All logs
+#   docker compose logs -f gateway    # Gateway logs only
+#   docker compose down               # Stop and remove
+#
+# Custom deer-flow version:
+#   DEER_FLOW_REF=v2.0.0 docker compose build
+# ============================================================================
+
+services:
+  # ── Reverse Proxy ──────────────────────────────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    container_name: archon-deerflow-nginx
+    ports:
+      - "${PORT:-2026}:2026"
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf.template:ro
+    command: >
+      sh -c "cp /etc/nginx/nginx.conf.template /etc/nginx/nginx.conf
+      && nginx -g 'daemon off;'"
+    depends_on:
+      - frontend
+      - gateway
+    networks:
+      - archon-deerflow
+    restart: unless-stopped
+
+  # ── Frontend: Next.js Web UI ──────────────────────────────────────────────
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.frontend
+      args:
+        - DEER_FLOW_REPO=${DEER_FLOW_REPO:-https://github.com/bytedance/deer-flow.git}
+        - DEER_FLOW_REF=${DEER_FLOW_REF:-main}
+        - NPM_REGISTRY=${NPM_REGISTRY:-}
+    image: archon-deerflow-frontend:latest
+    container_name: archon-deerflow-frontend
+    environment:
+      - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET:-archon-deerflow-dev-secret-change-me}
+      - DEER_FLOW_INTERNAL_GATEWAY_BASE_URL=http://gateway:8001
+    networks:
+      - archon-deerflow
+    restart: unless-stopped
+
+  # ── Gateway: FastAPI + Agent Runtime + Phase 1-6 overlay ───────────────────
+  gateway:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        - DEER_FLOW_REPO=${DEER_FLOW_REPO:-https://github.com/bytedance/deer-flow.git}
+        - DEER_FLOW_REF=${DEER_FLOW_REF:-main}
+        - APT_MIRROR=${APT_MIRROR:-}
+    image: archon-deerflow-gateway:latest
+    container_name: archon-deerflow-gateway
+    env_file:
+      - .env
+    environment:
+      - GATEWAY_CORS_ORIGINS=${GATEWAY_CORS_ORIGINS:-http://localhost:2026}
+      - GATEWAY_LISTEN_HOST=0.0.0.0
+      - GATEWAY_LISTEN_PORT=8001
+      - GATEWAY_ENABLE_DOCS=${GATEWAY_ENABLE_DOCS:-true}
+    volumes:
+      - ./data/checkpoints:/app/deer-flow/backend/data
+      - ./data/memory:/app/deer-flow/backend/.deer-flow
+      - ./workspace:/mnt/user-data/workspace
+      - ./uploads:/mnt/user-data/uploads
+      - ./outputs:/mnt/user-data/outputs
+      # Live dev: mount overlay + configs (remove for production)
+      - ./overlay:/app/deer-flow/overlay:ro
+      - ./skills:/app/deer-flow/skills:ro
+      - ./config.yaml:/app/deer-flow/config.yaml:ro
+      - ./extensions_config.json:/app/deer-flow/extensions_config.json:ro
+    networks:
+      - archon-deerflow
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+networks:
+  archon-deerflow:
+    driver: bridge

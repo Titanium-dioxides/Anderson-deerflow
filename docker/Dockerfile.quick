@@ -1,0 +1,15 @@
+# ── Archon-DeerFlow Quick Deploy ──
+# Builds on top of an existing deer-flow-gateway image.
+# Only overlays our workflow definitions + skills + configs.
+#
+# Usage:
+#   docker build -f docker/Dockerfile.quick -t archon-deerflow:latest .
+FROM docker-gateway:latest
+
+COPY skills /app/skills/custom
+COPY extensions_config.json /app/extensions_config.json
+COPY overlay/backend/langgraph.json /app/backend/langgraph.json
+COPY overlay/backend/workflows /app/overlay/backend/workflows
+COPY overlay/backend/__init__.py /app/overlay/backend/__init__.py
+
+ENV PYTHONPATH=/app/backend/packages/harness:/app/overlay/backend:$PYTHONPATH

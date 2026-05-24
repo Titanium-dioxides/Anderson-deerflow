@@ -1,0 +1,42 @@
+# ── archon-deerflow frontend ──
+# Clones deer-flow from GitHub and builds the Next.js frontend.
+#
+# Build args:
+#   DEER_FLOW_REPO  — upstream deer-flow repo
+#   DEER_FLOW_REF   — branch or tag
+#   NPM_REGISTRY    — optional npm mirror
+# ────────────────────────────────────────────────────────────────────────────
+
+FROM node:22-alpine AS builder
+
+ARG DEER_FLOW_REPO=https://github.com/bytedance/deer-flow.git
+ARG DEER_FLOW_REF=main
+ARG NPM_REGISTRY
+
+RUN corepack enable && corepack install -g pnpm@10.26.2
+RUN if [ -n "${NPM_REGISTRY}" ]; then pnpm config set registry "${NPM_REGISTRY}"; fi
+
+# Clone deer-flow and build frontend
+RUN mkdir -p /app \
+    && apk add --no-cache git \
+    && git clone --depth 1 --branch "${DEER_FLOW_REF}" "${DEER_FLOW_REPO}" /tmp/deer-flow-src \
+    && cp -r /tmp/deer-flow-src/frontend /app/frontend \
+    && rm -rf /tmp/deer-flow-src
+
+WORKDIR /app/frontend
+RUN pnpm install --frozen-lockfile
+RUN SKIP_ENV_VALIDATION=1 pnpm build
+
+# ── Prod runtime ──
+FROM node:22-alpine AS prod
+
+ARG NPM_REGISTRY
+
+RUN corepack enable && corepack install -g pnpm@10.26.2
+RUN if [ -n "${NPM_REGISTRY}" ]; then pnpm config set registry "${NPM_REGISTRY}"; fi
+
+RUN mkdir -p /app
+WORKDIR /app
+COPY --from=builder /app/frontend ./frontend
+EXPOSE 3000
+CMD ["sh", "-c", "cd /app/frontend && pnpm start"]

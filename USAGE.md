@@ -34,16 +34,16 @@ curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh
   | sh -s -- --default-toolchain leanprover/lean4:stable -y
 export PATH="$HOME/.elan/bin:$PATH"
 
-# 6. 配置 API Key
-cp .env.example .env
+# 6. 配置
+cp .env.example .env && cp config.example.yaml config.yaml
 # 编辑 .env，填入 DEEPSEEK_API_KEY=sk-xxx
 
-# 7. 配置 overlay
+# 7. 将 overlay 复制到 deer-flow 目录
 cp overlay/backend/langgraph.json deer-flow/backend/langgraph.json
+cp -r overlay/backend deer-flow/overlay/backend
+cp -r skills deer-flow/skills
 cp config.yaml deer-flow/backend/config.yaml
 cp extensions_config.json deer-flow/backend/extensions_config.json
-cp -r overlay deer-flow/overlay
-cp -r skills deer-flow/skills
 
 # 8. 启动 Gateway
 cd deer-flow/backend
@@ -280,7 +280,27 @@ Phase 6 — E2E Acceptance（可选）
 ## 测试
 
 ```bash
-python3 -m pytest tests/ -q     # 19 项测试
+python3 -m pytest tests/ -q     # 28 项测试
+```
+
+---
+
+## 项目文件结构
+
+```
+archon-deerflow/
+├── overlay/backend/             ← 本项目的全部代码（overlay only）
+│   ├── workflows/               ← Phase 1-6 graph 定义
+│   └── mcp/                     ← Lean LSP 工具（6 + search/verify）
+├── skills/                      ← 自定义 skills（math-prover）
+├── agents/                      ← 6 个 agent 定义（Web UI 可见）
+├── docker/                      ← Dockerfile + nginx + entrypoint
+├── tests/                       ← 28 项测试
+├── scripts/                     ← prove.py + dev.sh + graph_viz.py
+├── config.example.yaml          ← 配置模板（复制为 config.yaml）
+├── .env.example                 ← 环境变量模板（复制为 .env）
+├── docker-compose.yml           ← Gateway 模式（nginx+前端+gateway）
+└── docker-compose.studio.yml    ← Studio 模式（图可视化）
 ```
 
 ---

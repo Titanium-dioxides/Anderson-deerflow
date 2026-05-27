@@ -375,6 +375,83 @@ def _search_mathlib_local(query: str, mathlib_path: str, search_type: str = "nam
     return results
 
 
+def _search_leansearch_api(query: str) -> list[dict]:
+    """Search via LeanSearch API (semantic/natural-language search)."""
+    results = []
+    try:
+        import urllib.request, urllib.parse
+        encoded = urllib.parse.quote(query)
+        req = urllib.request.Request(
+            f"https://leansearch.net/api/search?query={encoded}&num_results=10",
+            headers={"User-Agent": "archon-deerflow/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+            for item in data.get("results", [])[:10]:
+                results.append({
+                    "name": item.get("name", ""),
+                    "type": item.get("type", ""),
+                    "module": item.get("module", ""),
+                    "score": item.get("score", 0),
+                    "source": "leansearch-api",
+                })
+    except Exception:
+        pass
+    return results
+
+
+def _search_loogle_api(query: str) -> list[dict]:
+    """Search via Loogle API (type-pattern search)."""
+    results = []
+    try:
+        import urllib.request, urllib.parse
+        encoded = urllib.parse.quote(query)
+        req = urllib.request.Request(
+            f"https://loogle.lean-lang.org/json?q={encoded}",
+            headers={"User-Agent": "archon-deerflow/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+            for item in data.get("hits", [])[:10]:
+                results.append({
+                    "name": item.get("name", ""),
+                    "type": item.get("type", ""),
+                    "module": item.get("module", ""),
+                    "source": "loogle-api",
+                })
+    except Exception:
+        pass
+    return results
+
+
+def _search_matlas_api(query: str) -> list[dict]:
+    """Search via Matlas API (mathematical literature theorem search)."""
+    results = []
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            "https://matlas.ai/api/search",
+            data=json.dumps({"query": query}).encode(),
+            headers={"Content-Type": "application/json", "User-Agent": "archon-deerflow/1.0"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.loads(resp.read())
+            for item in (data if isinstance(data, list) else data.get("results", []))[:10]:
+                results.append({
+                    "name": item.get("entity_name", ""),
+                    "type": item.get("type", ""),
+                    "statement": item.get("statement", "")[:300],
+                    "title": item.get("title", ""),
+                    "authors": item.get("authors", ""),
+                    "doi": item.get("doi", ""),
+                    "year": item.get("year", ""),
+                    "source": "matlas-api",
+                })
+    except Exception:
+        pass
+    return results
+
 
 def _search_project_local(query: str, project_dir: Path) -> list[dict]:
     """Search project-local .lean files."""
@@ -682,7 +759,7 @@ def verify_theorem(statement: str, known_lemmas: str = "", project_dir: str = ".
             "statement": r.get("statement", "")[:200],
             "source": r.get("source", ""),
             "doi": r.get("doi", ""),
-        } for r in all_results[:5] if r.get("source") in ("matlas", "leansearch", "loogle")],
+        } for r in matlas_results[:5]],
         "recommended_action": (
             "Directly use from Mathlib" if credibility >= 10
             else "Use as proof guide; formalize key steps" if credibility >= 7

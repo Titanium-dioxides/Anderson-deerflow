@@ -1,0 +1,143 @@
+# Archon-DeerFlow Configuration
+# ==============================================================================
+# Copy to config.yaml and fill in your values.
+#   cp config.example.yaml config.yaml
+#
+# Environment variables (place in .env):
+#   DEEPSEEK_API_KEY=sk-xxx    # Required — LLM API key
+#   TAVILY_API_KEY=tvly-xxx    # Optional — web search
+#   JINA_API_KEY=jina_xxx      # Optional — web page extraction
+# ==============================================================================
+
+# ── Chat Models ───────────────────────────────────────────────────────────────
+# supports_thinking: true  → enables "Pro" mode (extended reasoning)
+# supports_reasoning_effort: true → enables "Ultra" mode
+models:
+  - name: deepseek-v4
+    display_name: DeepSeek V4 (All Modes)
+    use: langchain_deepseek:ChatDeepSeek
+    model: deepseek-chat
+    api_key: $DEEPSEEK_API_KEY        # resolved from .env
+    max_tokens: 65536
+    supports_thinking: true
+    supports_reasoning_effort: true
+    supports_vision: false
+    when_thinking_enabled:
+      model: deepseek-chat
+      max_tokens: 65536
+      extra_body:
+        thinking:
+          type: enabled                # activates DeepSeek thinking mode
+    when_thinking_disabled:
+      extra_body:
+        thinking:
+          type: disabled
+
+# ── Tools ─────────────────────────────────────────────────────────────────────
+# DeerFlow discovers tools via get_available_tools().
+# Each tool has a name, import path (use:), and group for access control.
+tools:
+  # ── Sandbox tools (file I/O, bash) ──
+  - name: bash
+    use: deerflow.sandbox.tools:bash_tool
+    group: bash
+  - name: read_file
+    use: deerflow.sandbox.tools:read_file_tool
+    group: file
+  - name: write_file
+    use: deerflow.sandbox.tools:write_file_tool
+    group: file
+  - name: str_replace
+    use: deerflow.sandbox.tools:str_replace_tool
+    group: file
+  - name: ls
+    use: deerflow.sandbox.tools:ls_tool
+    group: file
+  - name: grep
+    use: deerflow.sandbox.tools:grep_tool
+    group: file
+  - name: glob
+    use: deerflow.sandbox.tools:glob_tool
+    group: file
+
+  # ── Web tools (optional API keys) ──
+  - name: web_search
+    use: deerflow.community.tavily:web_search_tool
+    group: web
+    api_key: $TAVILY_API_KEY
+  - name: web_fetch
+    use: deerflow.community.jina_ai:web_fetch_tool
+    group: web
+    api_key: $JINA_API_KEY
+
+  # ── Lean 4 proving tools ──
+  - name: lean_check_file
+    use: overlay.backend.mcp.lean_tools:lean_check_file
+    group: lean
+  - name: lean_build
+    use: overlay.backend.mcp.lean_tools:lean_build
+    group: lean
+  - name: lean_sorry_scan
+    use: overlay.backend.mcp.lean_tools:lean_sorry_scan
+    group: lean
+  - name: lean_file_outline
+    use: overlay.backend.mcp.lean_tools:lean_file_outline
+    group: lean
+  - name: lean_goal_at
+    use: overlay.backend.mcp.lean_tools:lean_goal_at
+    group: lean
+  - name: lean_theorem_search
+    use: overlay.backend.mcp.lean_tools:lean_theorem_search
+    group: lean
+  - name: search_and_verify
+    use: overlay.backend.mcp.lean_tools:search_and_verify
+    group: lean
+  - name: verify_theorem
+    use: overlay.backend.mcp.lean_tools:verify_theorem
+    group: lean
+
+# ── Tool Groups ───────────────────────────────────────────────────────────────
+tool_groups:
+  - name: lean
+    display_name: Lean 4
+    description: Lean 4 theorem prover tools
+
+# ── Agents API ────────────────────────────────────────────────────────────────
+# Enables custom agent management via the REST API and web UI.
+agents_api:
+  enabled: true
+
+# ── Sandbox ───────────────────────────────────────────────────────────────────
+# local: execute commands directly on the host filesystem.
+# For Docker/Kubernetes sandbox isolation, see deer-flow docs.
+sandbox:
+  backend: local
+  use: deerflow.sandbox.local:LocalSandboxProvider
+
+# ── Persistence ───────────────────────────────────────────────────────────────
+persistence:
+  backend: sqlite
+  sqlite_dir: /app/backend/data
+
+# ── Subagents ─────────────────────────────────────────────────────────────────
+subagents:
+  custom_agents: {}
+
+# ── Memory ────────────────────────────────────────────────────────────────────
+memory:
+  enabled: false
+  backend: memory
+
+# ── Summarization ─────────────────────────────────────────────────────────────
+summarization:
+  enabled: false
+
+# ── Loop Detection ────────────────────────────────────────────────────────────
+loop_detection:
+  enabled: true
+  max_repeats: 5
+
+# ── Skills ────────────────────────────────────────────────────────────────────
+skills:
+  container_path: /app/skills
+  get_skills_path: /app/skills

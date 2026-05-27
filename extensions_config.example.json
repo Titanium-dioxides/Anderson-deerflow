@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "lean-lsp": {
+      "enabled": false,
+      "type": "stdio",
+      "command": "uvx",
+      "args": [
+        "/app/lean-lsp-mcp"
+      ],
+      "env": {},
+      "description": "Lean 4 Language Server Protocol MCP — enable for LSP-level theorem search"
+    }
+  },
+  "skills": {}
+}

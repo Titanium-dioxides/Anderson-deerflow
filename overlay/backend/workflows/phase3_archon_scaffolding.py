@@ -194,20 +194,55 @@ def _fallback_module(statement: str, informal_proof: str) -> dict[str, object]:
 
 
 def _extract_json_object(text: str) -> dict:
+    """Extract a JSON object from LLM output with robust fallbacks.
+
+    Handles: markdown fences, trailing text after JSON, nested braces,
+    and common LLM formatting quirks.
+    """
     output_text = text.strip()
-    if output_text.startswith("```"):
-        lines = output_text.splitlines()
-        if len(lines) >= 2:
-            output_text = "\n".join(lines[1:-1] if lines[-1].startswith("```") else lines[1:])
-    output_text = output_text.removeprefix("json").strip()
+
+    # 1. Strip markdown code fences of any depth
+    while output_text.startswith("```"):
+        first_nl = output_text.find("\n")
+        if first_nl == -1:
+            break
+        fence_header = output_text[:first_nl].strip("`").strip()
+        lang = fence_header or ""
+        output_text = output_text[first_nl + 1 :]
+        # Find matching closing fence
+        end_fence = output_text.rfind("```")
+        if end_fence != -1:
+            output_text = output_text[:end_fence]
+        if lang.lower() in ("json", ""):
+            output_text = output_text.strip()
+            break
+
+    # 2. Try direct parse first
     try:
         return json.loads(output_text)
     except json.JSONDecodeError:
-        start = output_text.find("{")
-        end = output_text.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            return json.loads(output_text[start : end + 1])
-        raise
+        pass
+
+    # 3. Find outermost { } pair with brace counting
+    start = output_text.find("{")
+    if start == -1:
+        raise json.JSONDecodeError("No JSON object found", output_text, 0)
+
+    depth = 0
+    end = -1
+    for i in range(start, len(output_text)):
+        if output_text[i] == "{":
+            depth += 1
+        elif output_text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+
+    if end != -1 and end > start:
+        return json.loads(output_text[start : end + 1])
+
+    raise json.JSONDecodeError("Unmatched braces in JSON", output_text, start)
 
 
 def _normalize_module_content(content: str, imports: list[str]) -> str:
@@ -499,18 +534,35 @@ def autoformalize_node(state: Phase3ArchonScaffoldingState) -> Phase3ArchonScaff
         "Translate this into Lean 4 skeleton code. Output JSON as specified."
     )
 
-    autoformalize_output = _run_deerflow_agent(
-        prompt,
-        system_prompt=system_prompt,
-        tools=[],
-        thread_id=f"{thread_id}-archon-autoformalize",
-    )
-
+    max_retries = 2
     parsed: dict = {}
-    try:
-        parsed = _extract_json_object(autoformalize_output)
-    except json.JSONDecodeError:
-        parsed = _fallback_module(statement, informal_proof)
+    autoformalize_output = ""
+
+    for attempt in range(max_retries + 1):
+        autoformalize_output = _run_deerflow_agent(
+            prompt,
+            system_prompt=system_prompt,
+            tools=[],
+            thread_id=f"{thread_id}-archon-autoformalize{'-r'+str(attempt) if attempt > 0 else ''}",
+        )
+        try:
+            parsed = _extract_json_object(autoformalize_output)
+            break
+        except json.JSONDecodeError as e:
+            if attempt < max_retries:
+                # Retry: tell the LLM what was wrong
+                error_snippet = autoformalize_output[:200].replace("\n", " ")
+                prompt = (
+                    f"Your previous output was not valid JSON. Error: {e}\n"
+                    f"First 200 chars of your output: {error_snippet}\n\n"
+                    f"Problem statement:\n{statement}\n\n"
+                    f"Informal proof:\n{informal_proof}\n\n"
+                    f"You MUST output ONLY a valid JSON object. No markdown fences, no "
+                    f"explanatory text before or after. Start with {{ and end with }}.\n"
+                    f'Required keys: "modules", "theorem_count", "sorry_count", "mathlib_deps", "summary".'
+                )
+            else:
+                parsed = _fallback_module(statement, informal_proof)
 
     # Write module files to formal/src/
     formal_src = project_root / "formal" / "src"

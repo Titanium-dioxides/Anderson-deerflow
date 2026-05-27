@@ -13,6 +13,55 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Memory channel writer — each tool call records to the appropriate .jsonl file
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_MEMORY_CHANNEL_MAP = {
+    "search_mathematical_results": "search_results",
+    "obtain_immediate_conclusions": "conclusions",
+    "construct_examples": "examples",
+    "construct_counterexamples": "counterexamples",
+    "propose_decomposition": "decompositions",
+    "direct_proving": "proof_steps",
+    "recursive_proving": "recursive_results",
+    "identify_key_failures": "failures",
+    "verify_proof": "verifications",
+    "query_memory": "search_results",
+}
+
+
+def _write_to_memory(tool_name: str, record: dict) -> None:
+    """Write a tool call record to the appropriate Rethlas memory channel."""
+    channel = _MEMORY_CHANNEL_MAP.get(tool_name, "search_results")
+    runtime_root = os.environ.get("ARCHON_DEERFLOW_RUNTIME_ROOT", ".deerflow_runtime")
+
+    # Find the thread workspace — look for most recent thread with rethlas memory
+    threads_dir = Path(runtime_root) / "threads"
+    if not threads_dir.exists():
+        return
+
+    candidates = sorted(threads_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
+    for thread_dir in candidates:
+        for workspace_dir in thread_dir.rglob("memory/rethlas"):
+            for problem_dir in workspace_dir.iterdir():
+                if problem_dir.is_dir():
+                    channel_file = problem_dir / f"{channel}.jsonl"
+                    try:
+                        channel_file.parent.mkdir(parents=True, exist_ok=True)
+                        entry = {
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "tool": tool_name,
+                            **record,
+                        }
+                        with channel_file.open("a", encoding="utf-8") as f:
+                            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                    except Exception:
+                        pass
+                    return  # Write to first found problem memory only
+
+
 from langchain.tools import tool
 
 
@@ -26,11 +75,23 @@ def _allow_direct_http_fallback() -> bool:
 
 def _memory_root() -> Path | None:
     root = os.environ.get("RETHLAS_MEMORY_ROOT")
-    if not root:
+    if root:
+        path = Path(root)
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    # Fallback: scan runtime dirs for most recent rethlas memory
+    runtime = os.environ.get("ARCHON_DEERFLOW_RUNTIME_ROOT", ".deerflow_runtime")
+    threads = Path(runtime) / "threads"
+    if not threads.exists():
         return None
-    path = Path(root)
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+
+    for td in sorted(threads.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+        for mem_dir in td.rglob("memory/rethlas"):
+            for problem_dir in mem_dir.iterdir():
+                if problem_dir.is_dir():
+                    return problem_dir
+    return None
 
 
 def _append_jsonl(path: Path, record: dict) -> None:
@@ -88,22 +149,36 @@ def _get_available_tools():
 
 
 def _invoke_named_tool(candidate_names: list[str], payload: dict, *, groups: list[str] | None = None):
+    """Invoke a registered DeerFlow tool by name, routing through the tool registry."""
     get_available_tools = _get_available_tools()
     if get_available_tools is None:
         return None
-    try:
-        tools = get_available_tools(
-            groups=groups or [],
-            include_mcp=True,
-            model_name="",
-            subagent_enabled=False,
-        )
-    except TypeError:
-        try:
-            tools = get_available_tools(groups=groups or [])
-        except Exception:
-            return None
-    except Exception:
+
+    effective_groups = groups if groups else ["lean", "web", "file"]
+
+    for include_mcp in (False, True):
+        for group_list in (effective_groups, ["lean", "file"], ["lean"]):
+            try:
+                tools = get_available_tools(
+                    groups=group_list,
+                    include_mcp=include_mcp,
+                    model_name="",
+                    subagent_enabled=False,
+                )
+                if tools:
+                    break
+            except TypeError:
+                try:
+                    tools = get_available_tools(groups=group_list)
+                    if tools:
+                        break
+                except Exception:
+                    continue
+            except Exception:
+                continue
+        if tools:
+            break
+    else:
         return None
 
     for tool_obj in tools or []:

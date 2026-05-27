@@ -1,0 +1,12 @@
+[project]
+name = "archon-deerflow-studio"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "langgraph",
+    "langgraph-cli[inmem]",
+    "langgraph-checkpoint",
+    "langgraph-sdk",
+    "langchain",
+    "langchain-core",
+]

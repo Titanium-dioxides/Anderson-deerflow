@@ -1,0 +1,27 @@
+# archon-deerflow LangGraph Studio
+# ============================================================================
+# Graph visualization mode — no deer-flow Gateway, no frontend, no nginx.
+# Pure LangGraph API server for visual graph exploration.
+#
+# Usage:
+#   docker compose -f docker-compose.studio.yml up -d
+#   docker compose -f docker-compose.studio.yml down
+#
+# Studio URLs:
+#   http://localhost:8123/ok           — health check
+#   http://localhost:8123/docs         — OpenAPI docs
+#   http://localhost:8123/assistants/search  — list graphs (POST {})
+#
+# Desktop Studio (macOS): connect to http://localhost:8123
+# ============================================================================
+
+services:
+  studio:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.studio
+    image: archon-deerflow-studio:latest
+    container_name: archon-deerflow-studio
+    ports:
+      - "${STUDIO_PORT:-8123}:8123"
+    restart: unless-stopped

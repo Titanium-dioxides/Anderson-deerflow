@@ -1,0 +1,15 @@
+{
+  "$schema": "https://langgra.ph/schema.json",
+  "python_version": "3.12",
+  "dependencies": [
+    "."
+  ],
+  "graphs": {
+    "Phase 1 — Workspace": "archon_graphs:build_phase1",
+    "Phase 2 — Rethlas": "archon_graphs:build_phase2",
+    "Phase 3 — Scaffolding": "archon_graphs:build_phase3",
+    "Phase 4 — Proving Loop": "archon_graphs:build_phase4",
+    "Phase 5 — Polish/Export": "archon_graphs:build_phase5",
+    "Phase 6 — E2E Pipeline": "archon_graphs:build_phase6"
+  }
+}

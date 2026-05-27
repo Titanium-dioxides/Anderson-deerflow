@@ -77,6 +77,8 @@ services:
       - ./workspace:/mnt/user-data/workspace
       - ./uploads:/mnt/user-data/uploads
       - ./outputs:/mnt/user-data/outputs
+      # Agent definitions (SOUL.md + config.yaml per agent)
+      - ./agents:/app/deer-flow/backend/.deer-flow/agents:ro
       # Live dev: mount overlay + configs (remove for production)
       - ./overlay:/app/deer-flow/overlay:ro
       - ./skills:/app/deer-flow/skills:ro

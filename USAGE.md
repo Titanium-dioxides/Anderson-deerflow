@@ -8,56 +8,73 @@ Archon-DeerFlow 是一个**自动化数学定理证明系统**：输入自然语
 
 ### 方式一：本机部署（无 Docker）
 
+本机部署同样运行三服务栈（nginx + 前端 + gateway），与 Docker 模式架构完全一致。
+
+**前提：** Python 3.12+ / Node.js 22+ / pnpm / git / nginx
+
 ```bash
 # 1. 克隆项目
 git clone https://github.com/Titanium-dioxides/Anderson-deerflow.git
 cd Anderson-deerflow
 
-# 2. 创建虚拟环境
-python3.12 -m venv .venv
-source .venv/bin/activate
+# 2. 创建 Python 虚拟环境
+python3.12 -m venv .venv && source .venv/bin/activate
 
-# 3. 克隆 deer-flow runtime（从 GitHub）
-git clone --depth 1 --branch main \
-  https://github.com/bytedance/deer-flow.git deer-flow
-
-# 4. 安装依赖
+# 3. 安装 Python 依赖
 pip install fastapi uvicorn[standard] httpx python-multipart sse-starlette \
   langgraph langgraph-checkpoint-sqlite langgraph-sdk \
   langchain langchain-core langchain-deepseek \
   lark-oapi slack-sdk python-telegram-bot markdown-to-mrkdwn \
   email-validator bcrypt pyjwt ddgs
+
+# 4. 克隆 deer-flow runtime + 安装 harness
+git clone --depth 1 --branch main \
+  https://github.com/bytedance/deer-flow.git deer-flow
 pip install -e deer-flow/backend/packages/harness
 
-# 5. 安装 Lean 4（可选，lake build 需要）
+# 5. 构建前端（Next.js）
+cd deer-flow/frontend
+corepack enable && corepack install -g pnpm@10
+pnpm install --frozen-lockfile
+SKIP_ENV_VALIDATION=1 pnpm build
+cd ../..
+
+# 6. 安装 Lean 4（可选，lake build 需要）
 curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
   | sh -s -- --default-toolchain leanprover/lean4:stable -y
 export PATH="$HOME/.elan/bin:$PATH"
 
-# 6. 配置
+# 7. 配置
 cp .env.example .env && cp config.example.yaml config.yaml
 # 编辑 .env，填入 DEEPSEEK_API_KEY=sk-xxx
 
-# 7. 将 overlay 复制到 deer-flow 目录
+# 8. 部署 overlay 到 deer-flow
 cp overlay/backend/langgraph.json deer-flow/backend/langgraph.json
 cp -r overlay/backend deer-flow/overlay/backend
 cp -r skills deer-flow/skills
 cp config.yaml deer-flow/backend/config.yaml
 cp extensions_config.json deer-flow/backend/extensions_config.json
 
-# 8. 启动 Gateway
+# 9. 启动 Gateway（终端 1）
 cd deer-flow/backend
 PYTHONPATH=".:packages/harness:../../overlay/backend" \
-  python3 -m uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001
+  python3 -m uvicorn app.gateway.app:app --host 127.0.0.1 --port 8001
+
+# 10. 启动前端（终端 2）
+cd deer-flow/frontend
+pnpm start  # 监听 http://localhost:3000
+
+# 11. 启动 nginx（终端 3）
+nginx -c "$(pwd)/docker/nginx/nginx.conf"  # 监听 http://localhost:2026
 ```
 
-Gateway 监听 `http://localhost:8001`。
-
-**或使用一键脚本：**
+**或一键启动：**
 ```bash
-./scripts/dev.sh             # 自动 clone deer-flow + 启动，含热加载
-./scripts/dev.sh --port 9000  # 自定义端口
+./scripts/dev.sh             # 自动 clone + 启动 Gateway + 热加载（仅 gateway）
+./scripts/dev.sh --full      # 三服务全栈启动
 ```
+
+Gateway → `:8001` / 前端 → `:3000` / nginx 统一入口 → `:2026`。
 
 ### 方式二：Docker 部署
 
@@ -68,6 +85,33 @@ docker compose up -d           # 监听 http://localhost:2026
 # Studio 模式（仅 graph 可视化）
 docker compose -f docker-compose.studio.yml up -d  # 监听 http://localhost:8123
 ```
+
+### 反向代理架构（Docker）
+
+```
+浏览器 → :2026 (nginx)
+              │
+              ├─ /api/*          → gateway:8001   (FastAPI + LangGraph agent)
+              ├─ /health         → gateway:8001   (健康检查)
+              ├─ /docs           → gateway:8001   (Swagger)
+              ├─ /openapi.json   → gateway:8001   (OpenAPI schema)
+              └─ /* (其他)       → frontend:3000  (Next.js Web UI)
+```
+
+| 路由 | 后端 | 说明 |
+|------|------|------|
+| `/api/*` | gateway:8001 | 所有 REST API + LangGraph agent 调用 |
+| `/health` | gateway:8001 | 健康检查 `{"status":"healthy"}` |
+| `/docs`, `/openapi.json` | gateway:8001 | Swagger UI 和 OpenAPI schema |
+| `/` 及其他所有路径 | frontend:3000 | Next.js 页面（聊天、设置、agent 管理） |
+
+关键细节：
+- **流式响应**：`proxy_buffering off` + `chunked_transfer_encoding on`，LLM SSE 输出实时到达
+- **超时**：`proxy_read_timeout 600s`，长证明任务不会因代理超时中断
+- **服务发现**：`set $gateway_upstream gateway:8001` 每次请求解析 Docker DNS，容器重启后 IP 变化无需重启 nginx
+- **WebSocket**：前端路由配置了 `Upgrade` / `Connection` 头，支持 Next.js HMR
+
+本机部署不经过 nginx，Gateway 直接监听 `:8001`。
 
 ### 首次认证
 

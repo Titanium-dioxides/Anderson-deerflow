@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "archon-lean-lsp": {
+      "command": "uvx",
+      "args": ["/home/zdzdhd/ai4math/Archon/.archon-src/tools/lean-lsp-mcp"],
+      "scope": "project"
+    }
+  }
+}
